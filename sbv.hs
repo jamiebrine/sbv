@@ -33,7 +33,7 @@ parse str            = error "Invalid expression - invalid sequence of character
 -- Int value handles layers of nested seqs
 parseSeq :: Int -> [Term] -> [Char] -> String -> Term
 parseSeq 0 ts ys (x:xs)
-  | x == '<'  = parseSeq 1 ts ys (x:xs)
+  | x == '<'  = parseSeq 1 ts (x:ys) xs
   | x == '>'  = Seq (reverse (parse (reverse ys) : ts))
   | x == ';'  = parseSeq 0 (parse (reverse ys) : ts) [] xs
   | otherwise = parseSeq 0 ts (x:ys) xs
@@ -44,8 +44,8 @@ parseSeq n ts ys (x:xs)
 
 parsePar :: Int -> [Term] -> [Char] -> String -> Term
 parsePar 0 ts ys (x:xs)
-  | x == '('  = parsePar 1 ts ys (x:xs)
-  | x == '['  = parsePar 1 ts ys (x:xs)
+  | x == '('  = parsePar 1 ts (x:ys) xs
+  | x == '['  = parsePar 1 ts (x:ys) xs
   | x == ']'  = Par (reverse (parse (reverse ys) : ts))
   | x == ','  = parsePar 0 (parse (reverse ys) : ts) [] xs
   | otherwise = parsePar 0 ts (x:ys) xs
@@ -58,9 +58,9 @@ parsePar n ts ys (x:xs)
 
 parseCopar :: Int -> [Term] -> [Char] -> String -> Term
 parseCopar 0 ts ys (x:xs)
-  | x == '('  = parseCopar 1 ts ys (x:xs)
-  | x == '['  = parseCopar 1 ts ys (x:xs)
-  | x == ']'  = Copar (reverse (parse (reverse ys) : ts))
+  | x == '('  = parseCopar 1 ts (x:ys) xs
+  | x == '['  = parseCopar 1 ts (x:ys) xs
+  | x == ')'  = Copar (reverse (parse (reverse ys) : ts))
   | x == ','  = parseCopar 0 (parse (reverse ys) : ts) [] xs
   | otherwise = parseCopar 0 ts (x:ys) xs
 parseCopar n ts ys (x:xs)
