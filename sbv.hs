@@ -44,6 +44,11 @@ parse ('[' : xs) = parsePar 0 [] [] xs
 parse ('(' : xs) = parseCopar 0 [] [] xs
 parse str = error "Invalid expression - invalid sequence of characters"
 
+parse2 :: String -> Term
+parse2 x = case x of
+  "O" -> O
+  "" -> O
+
 -- Identity is self dual
 parseNot :: Term -> Term
 parseNot O = O
