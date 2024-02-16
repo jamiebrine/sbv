@@ -127,6 +127,16 @@ rmv kept (O : ts) = rmv kept ts
 rmv kept (t : ts) = rmv (removeId t : kept) ts
 rmv kept [] = reverse kept
 
+-- Recursively applies de morgan's laws resulting in the only Not terms being variables
+deMorgan :: Term -> Term
+deMorgan (Not (Seq ts)) = Seq [Not (deMorgan t) | t <- ts]
+deMorgan (Not (Par ts)) = Copar [Not (deMorgan t) | t <- ts]
+deMorgan (Not (Copar ts)) = Par [Not (deMorgan t) | t <- ts]
+deMorgan (Seq ts) = Seq [deMorgan t | t <- ts]
+deMorgan (Par ts) = Par [deMorgan t | t <- ts]
+deMorgan (Copar ts) = Copar [deMorgan t | t <- ts]
+deMorgan t = t
+
 -- Flattens instances of a structure nested within the same structure
 associate :: Term -> Term
 associate (Seq ts) = Seq (concat [unSeq t | t <- ts])
@@ -147,16 +157,6 @@ unCopar :: Term -> [Term]
 unCopar (Copar ts) = concat [unCopar t | t <- ts]
 unCopar t = [associate t]
 
--- Recursively applies de morgan's laws resulting in the only Not terms being variables
-deMorgan :: Term -> Term
-deMorgan (Not (Seq ts)) = Seq [Not (deMorgan t) | t <- ts]
-deMorgan (Not (Par ts)) = Copar [Not (deMorgan t) | t <- ts]
-deMorgan (Not (Copar ts)) = Par [Not (deMorgan t) | t <- ts]
-deMorgan (Seq ts) = Seq [deMorgan t | t <- ts]
-deMorgan (Par ts) = Par [deMorgan t | t <- ts]
-deMorgan (Copar ts) = Copar [deMorgan t | t <- ts]
-deMorgan t = t
-
 -- Removes double negatives
 doubleNegative :: Term -> Term
 doubleNegative (Not (Not t)) = doubleNegative t
@@ -168,14 +168,14 @@ doubleNegative t = t
 -- Any singleton structures are replaced by just the element itself
 extractSingleton :: Term -> Term
 extractSingleton (Seq (t : ts))
-  | null ts = t
-  | otherwise = Seq (t : ts)
+  | null ts = extractSingleton t
+  | otherwise = Seq [extractSingleton a | a <- t : ts]
 extractSingleton (Par (t : ts))
-  | null ts = t
-  | otherwise = Par (t : ts)
+  | null ts = extractSingleton t
+  | otherwise = Par [extractSingleton a | a <- t : ts]
 extractSingleton (Copar (t : ts))
-  | null ts = t
-  | otherwise = Copar (t : ts)
+  | null ts = extractSingleton t
+  | otherwise = Copar [extractSingleton a | a <- t : ts]
 extractSingleton t = t
 
 -- Reorders par and copar structures into a predefined normal form (Copar, Par, Seq, Var, Not Var)
@@ -203,7 +203,7 @@ sortVars [] = []
 -- Applies all of the above functions in order to put any term in its normal form
 -- This form is defined in such a way that any 2 logically equivalent terms will be exactly equal once normalised
 normalise :: Term -> Term
-normalise t = reorder (extractSingleton (doubleNegative (deMorgan (associate (removeId t)))))
+normalise t = reorder (extractSingleton (doubleNegative (associate (deMorgan (removeId t)))))
 
 ---------------------------------------------------------------------------------
 -----------------------------Rewrite Rules---------------------------------------
@@ -230,7 +230,7 @@ aiDown a t = t
 -- Adds a Copar pair (a, Not a) to any term
 aiUp :: Char -> Term -> Term
 aiUp c t
-  | not (isVariableChar c) = error "Invalid rewrite - Variables must be letters only"
+  | not (isVariableChar c) = error "Invalid rewrite - Variables must be lowercase letters only"
   | otherwise = normalise (up c t)
   where
     up :: Char -> Term -> Term
