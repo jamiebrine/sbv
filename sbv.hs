@@ -4,12 +4,16 @@
 {-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 {-# HLINT ignore "Use infix" #-}
+{-# HLINT ignore "Use head" #-}
 
+import Control.Monad (guard)
+import Control.Monad.RWS (gets)
 import Data.Char (isLetter)
-import Data.List (intercalate, sort, (\\))
+import Data.List (intercalate, sort, subsequences, (\\))
 import Distribution.Simple.Utils (xargs)
 import GHC.Exts.Heap (GenClosure (tsoStack))
 import Language.Haskell.TH (safe)
+import Text.Read (Lexeme (String))
 
 data Term = O | V Char | Seq [Term] | Par [Term] | Copar [Term] | Not Term
   deriving (Eq)
@@ -96,23 +100,45 @@ outputTerm x = case x of
   Par xs -> "[" ++ intercalate "," [outputTerm x | x <- xs] ++ "]"
   Copar xs -> "(" ++ intercalate "," [outputTerm x | x <- xs] ++ ")"
 
+-- Outputs a list of terms in a more readable way
+oterms :: [Term] -> IO ()
+oterms ts = putStrLn (intercalate "\n" [outputTerm t | t <- ts])
+
+-- Outputs the result of a bfs in a more readable way
+osearch :: [(Term, String)] -> IO ()
+osearch ts = putStrLn (intercalate "\n" [outputTerm t ++ "    {" ++ p ++ "}" | (t, p) <- ts])
+
 ---------------------------------------------------------------------------------
 ---------------------------Normalise Terms---------------------------------------
 ---------------------------------------------------------------------------------
 
--- Removes any lone O terms from inside a Seq, Par, or Copar
+-- Removes any lone O terms and empty sequences from inside a Seq, Par, or Copar
 removeId :: Term -> Term
-removeId x = case x of
-  Seq ts -> Seq (rmv [] ts)
-  Par ts -> Par (rmv [] ts)
-  Copar ts -> Copar (rmv [] ts)
-  Not ts -> Not (removeId ts)
-  t -> t
+removeId x
+  | x == y = x
+  | otherwise = removeId y
   where
-    rmv :: [Term] -> [Term] -> [Term]
-    rmv kept (O : ts) = rmv kept ts
-    rmv kept (t : ts) = rmv (removeId t : kept) ts
-    rmv kept [] = reverse kept
+    y = rmvId x
+
+    -- Iteratively applies this function until the result is unchanged
+    rmvId :: Term -> Term
+    rmvId x = case x of
+      Seq [] -> O
+      Par [] -> O
+      Copar [] -> O
+      Seq ts -> Seq (rmv [] ts)
+      Par ts -> Par (rmv [] ts)
+      Copar ts -> Copar (rmv [] ts)
+      Not ts -> Not (rmvId ts)
+      t -> t
+      where
+        rmv :: [Term] -> [Term] -> [Term]
+        rmv kept (O : ts) = rmv kept ts
+        rmv kept (Seq [] : ts) = rmv kept ts
+        rmv kept (Par [] : ts) = rmv kept ts
+        rmv kept (Copar [] : ts) = rmv kept ts
+        rmv kept (t : ts) = rmv (rmvId t : kept) ts
+        rmv kept [] = reverse kept
 
 -- Recursively applies de morgan's laws resulting in the only Not terms being variables
 deMorgan :: Term -> Term
@@ -167,7 +193,8 @@ extractSingleton (Copar (t : ts))
   | otherwise = Copar [extractSingleton a | a <- t : ts]
 extractSingleton t = t
 
--- Reorders par and copar structures into a predefined normal form (Copar, Par, Seq, Var, Not Var) using sortTerms
+-- Reorders par and copar structures into a predefined normal form
+-- (Copar, Par, Seq, Var, Not Var) using sortTerms
 reorder :: Term -> Term
 reorder x = case x of
   Seq ts -> Seq [reorder t | t <- ts]
@@ -175,9 +202,14 @@ reorder x = case x of
   Copar ts -> Copar [reorder t | t <- sortTerms ts]
   t -> t
 
+-- Removes duplicate elements from any list
+removeDuplicates :: Eq a => [a] -> [a]
+removeDuplicates [] = []
+removeDuplicates (x : xs) = x : removeDuplicates (filter (/= x) xs)
+
 -- Sorts a list of terms into the normal order
 sortTerms :: [Term] -> [Term]
-sortTerms = st [] [] [] [] []
+sortTerms ts = removeDuplicates (st [] [] [] [] [] ts)
   where
     st :: [Term] -> [Term] -> [Term] -> [Term] -> [Term] -> [Term] -> [Term]
     st s p c v n x = case x of
@@ -186,7 +218,7 @@ sortTerms = st [] [] [] [] []
       (Copar t : ts) -> st s p (Copar t : c) v n ts
       (V x : ts) -> st s p c (V x : v) n ts
       (Not (V x) : ts) -> st s p c v (Not (V x) : n) ts
-      [] -> s ++ p ++ c ++ sortVars v ++ sortVars n
+      [] -> reverse s ++ reverse p ++ reverse c ++ sortVars v ++ sortVars n
       where
         sortVars :: [Term] -> [Term]
         sortVars (V t : ts) = [V x | x <- sort [x | V x <- V t : ts]]
@@ -194,76 +226,151 @@ sortTerms = st [] [] [] [] []
         sortVars [] = []
 
 -- Applies all of the above functions in order to put any term in its normal form
--- This form is defined in such a way that any 2 logically equivalent terms will be exactly equal once normalised
+-- Defined such that any 2 logically equivalent terms will be exactly equal once normalised
 normalise :: Term -> Term
-normalise t = reorder (extractSingleton (doubleNegative (associate (deMorgan (removeId t)))))
+normalise t = reorder (doubleNegative (associate (extractSingleton (deMorgan (removeId t)))))
 
 ---------------------------------------------------------------------------------
 -----------------------------Rewrite Rules---------------------------------------
 ---------------------------------------------------------------------------------
 
--- Helper function for rewrites that generate lists of terms
-removeDuplicates :: Eq a => [a] -> [a]
-removeDuplicates [] = []
-removeDuplicates (x : xs) = x : removeDuplicates (filter (/= x) xs)
+-- Deep inference logic that applies a given function to one element at a time of the given list
+-- and leaves the others unchanged
+deepInference :: [Term] -> (Term -> [Term]) -> [[Term]]
+deepInference ts f = di [] ts f \\ [ts]
+  where
+    di :: [Term] -> [Term] -> (Term -> [Term]) -> [[Term]]
+    di seen [] f = []
+    di seen (t : ts) f = [reverse seen ++ [s] ++ ts | s <- f t] ++ di (t : seen) ts f
+
+-- Gets a list of every letter that has been used as a variable in a term
+getUsedAtoms :: Term -> [Char]
+getUsedAtoms x = case x of
+  Seq ts -> removeDuplicates (concat [getUsedAtoms t | t <- ts])
+  Par ts -> removeDuplicates (concat [getUsedAtoms t | t <- ts])
+  Copar ts -> removeDuplicates (concat [getUsedAtoms t | t <- ts])
+  Not (V t) -> [t]
+  V t -> [t]
+  O -> []
+
+-- Gets the earliest letter in the alphabet that has not been used as a variable in a term
+getNextAtom :: Term -> Char
+getNextAtom t = x !! 0
+  where
+    x = ['a' .. 'z'] \\ getUsedAtoms t
 
 -- Removes any [a, Not a] pairs from a Par structure for a specified variable a
 aiDown :: Char -> Term -> Term
-aiDown a (Par ts) = Par (annihilate 0 [] a ts)
+aiDown a (Par ts) = Par (down 0 [] a ts)
   where
-    annihilate :: Int -> [Term] -> Char -> [Term] -> [Term]
-    annihilate n rest a ((V x) : ts)
-      | x == a = annihilate (n + 1) rest a ts
-      | otherwise = annihilate n (V x : rest) a ts
-    annihilate n rest a (Not (V x) : ts)
-      | x == a = annihilate (n - 1) rest a ts
-      | otherwise = annihilate n (Not (V x) : rest) a ts
-    annihilate n rest a (t : ts) = annihilate n (t : rest) a ts
-    annihilate n rest a []
+    down :: Int -> [Term] -> Char -> [Term] -> [Term]
+    down n rest a ((V x) : ts)
+      | x == a = down (n + 1) rest a ts
+      | otherwise = down n (V x : rest) a ts
+    down n rest a (Not (V x) : ts)
+      | x == a = down (n - 1) rest a ts
+      | otherwise = down n (Not (V x) : rest) a ts
+    down n rest a (t : ts) = down n (t : rest) a ts
+    down n rest a []
       | n == 0 = reverse rest
       | n < 0 = sortTerms (reverse rest ++ replicate (-n) (Not (V a)))
       | n > 0 = sortTerms (reverse rest ++ replicate n (V a))
 aiDown a t = t
 
--- Generates a list of all possible aiDown rewrites of a term
-alliDown :: Term -> [Term]
-alliDown t = removeDuplicates [aiDown a t | a <- ['a' .. 'z']]
-
--- Adds a Copar pair (a, Not a) to any term
+-- Adds a Copar pair (a, Not a) to any Par or Copar term; if term is a Seq, will put this pair in
+-- every possible position and return a single Par whose elements are these possible rewrites,
+-- which will then be unpacked by the alliUp function that calls it
 aiUp :: Char -> Term -> Term
 aiUp c t
   | not (isLetter c && c > 'Z') = error "Invalid rewrite - Variables must be lowercase letters only"
   | otherwise = normalise (up c t)
   where
     up :: Char -> Term -> Term
-    up c (Seq ts) = Seq (ts ++ [Copar [V c, Not (V c)]])
+    up c (Seq ts) = upSeq c ts
     up c (Par ts) = Par (ts ++ [Copar [V c, Not (V c)]])
     up c (Copar ts) = Copar (ts ++ [Copar [V c, Not (V c)]])
+    up c t = Copar [t, V c, Not (V c)]
+
+    upSeq :: Char -> [Term] -> Term
+    upSeq c ts = Par [Seq (take n ts ++ [Copar [V c, Not (V c)]] ++ drop n ts) | n <- [0 .. length ts]]
+
+-- Generates a list of all possible aiDown rewrites of a term
+alliDown :: Term -> [Term]
+alliDown x = case x of
+  Par ts ->
+    removeDuplicates
+      ( map
+          normalise
+          ( [aiDown a (Par ts) | a <- getUsedAtoms (Par ts)]
+              ++ [Par t | t <- deepInference ts alliDown]
+          )
+      )
+      \\ [Par ts]
+  Copar ts -> [Copar t | t <- deepInference ts alliDown]
+  Seq ts -> [Seq t | t <- deepInference ts alliDown]
+  t -> []
 
 -- Generates a list of all possible aiUp rewrites of a term
 alliUp :: Term -> [Term]
-alliUp t = removeDuplicates [aiUp a t | a <- ['a' .. 'z']]
+alliUp x = case x of
+  Seq ts ->
+    removeDuplicates
+      ( map
+          normalise
+          ( concat [ts | Par ts <- [aiUp a (Seq ts) | a <- getUsedAtoms (Seq ts)]]
+              ++ [Seq t | t <- deepInference ts alliUp]
+          )
+      )
+      \\ [Seq ts]
+  Par ts ->
+    removeDuplicates
+      ( map
+          normalise
+          ( [aiUp a (Par ts) | a <- getUsedAtoms (Par ts)]
+              ++ [Par t | t <- deepInference ts alliUp]
+          )
+      )
+      \\ [Par ts]
+  Copar ts ->
+    removeDuplicates
+      ( map
+          normalise
+          ( [aiUp a (Copar ts) | a <- getUsedAtoms (Copar ts)]
+              ++ [Copar t | t <- deepInference ts alliUp]
+          )
+      )
+      \\ [Copar ts]
+  t -> []
 
 -- Generates a list of all possible single step switches of a term
 switch :: Term -> [Term]
 switch x = case x of
   Par ts ->
-    removeDuplicates [normalise (Copar t) | t <- uncurry permute (extractCopar [] ts)] -- Switches top level term
-      ++ [normalise (Par t) | t <- deepSwitch ts] -- Switches subterms
-  Copar ts -> [normalise (Copar t) | t <- deepSwitch ts]
-  Seq ts -> [normalise (Seq t) | t <- deepSwitch ts]
+    removeDuplicates
+      ( map
+          normalise
+          ( [Par t | t <- uncurry permute (extractCopar ts)]
+              ++ [Par t | t <- deepInference ts switch]
+          )
+      )
+      \\ [Par ts] -- Switches subterms
+  Copar ts -> [normalise (Copar t) | t <- deepInference ts switch]
+  Seq ts -> [normalise (Seq t) | t <- deepInference ts switch]
   t -> []
   where
     -- If a list of terms has a copar element, returns ([the terms within the copar],[other elements of list])
-    extractCopar :: [Term] -> [Term] -> ([Term], [Term])
-    extractCopar as (Copar ts : bs) = (ts, reverse as ++ bs)
-    extractCopar as (x : bs) = extractCopar (x : as) bs
-    extractCopar as [] = ([], reverse as)
+    extractCopar :: [Term] -> ([Term], [Term])
+    extractCopar = ec []
+      where
+        ec :: [Term] -> [Term] -> ([Term], [Term])
+        ec as (Copar ts : bs) = (ts, reverse as ++ bs)
+        ec as (x : bs) = ec (x : as) bs
+        ec as [] = ([], reverse as)
 
     permute :: [Term] -> [Term] -> [[Term]] -- Alter this part to avoid incorrect permutations
     permute [] bs = []
     permute as bs =
-      [ sortTerms (Par (sortTerms (a ++ (bs \\ b))) : b ++ (as \\ a))
+      [ Copar (Par (Copar a : b) : (as \\ a)) : (bs \\ b)
         | a <- powerset as,
           b <- powerset bs
       ]
@@ -272,19 +379,112 @@ switch x = case x of
     powerset [] = [[]]
     powerset (x : xs) = [x : ps | ps <- powerset xs] ++ powerset xs
 
-    -- Switches each term in a list, returning a list of lists in which one term at a time are switched
-    -- and the others are unchanged
-    deepSwitch :: [Term] -> [[Term]]
-    deepSwitch = ds []
-      where
-        ds :: [Term] -> [Term] -> [[Term]]
-        ds seen [] = []
-        ds seen (t : ts) = [reverse seen ++ [s] ++ ts | s <- switch t] ++ ds (t : seen) ts
-
+-- Generates a list of all possible single step qDown applications of a term
 qDown :: Term -> [Term]
 qDown x = case x of
-  _ -> []
+  Par ts ->
+    removeDuplicates
+      ( map
+          normalise
+          ( [Seq t | t <- uncurry permute (extractSeq ts)]
+              ++ [Par t | t <- deepInference ts qDown]
+          )
+      )
+      \\ [Par ts]
+  Copar ts -> [normalise (Copar t) | t <- deepInference ts qDown]
+  Seq ts -> [normalise (Seq t) | t <- deepInference ts qDown]
+  t -> []
+  where
+    -- Returns a list of all sublists that begin with the first element
+    getSublists :: [a] -> [[a]]
+    getSublists [] = []
+    getSublists (x : xs) = [x] : [x : ys | ys <- getSublists xs]
 
+    -- Given a list of terms, returns ([],[]) unless the list is precicely 2 Seq structures
+    -- and nothing more, in which case it returns ([terms in first Seq], [terms in second Seq])
+    extractSeq :: [Term] -> ([Term], [Term])
+    extractSeq = es [] []
+      where
+        es :: [Term] -> [Term] -> [Term] -> ([Term], [Term])
+        es [] [] (Seq ts : rest) = es ts [] rest
+        es first [] (Seq ts : rest) = es first ts rest
+        es first second [] = (first, second)
+        es _ _ t = ([], [])
+
+    permute :: [Term] -> [Term] -> [[Term]]
+    permute [] [] = []
+    permute as bs =
+      [ [Par [Seq a, Seq b], Par [Seq (as \\ a), Seq (bs \\ b)]]
+        | a <- getSublists as,
+          b <- getSublists bs
+      ]
+
+-- Generates a list of all possible single step qUp applications of a term
 qUp :: Term -> [Term]
 qUp x = case x of
-  _ -> []
+  Seq ts ->
+    removeDuplicates
+      ( map
+          normalise
+          ( [Copar t | t <- uncurry permute (extractCopar ts)]
+              ++ [Seq t | t <- deepInference ts qUp]
+          )
+      )
+      \\ [Seq ts]
+  Copar ts -> [normalise (Copar t) | t <- deepInference ts qUp]
+  Par ts -> [normalise (Par t) | t <- deepInference ts qUp]
+  t -> []
+  where
+    -- Given a list of terms, returns ([],[]) unless the list is precicely 2 Copar structures
+    -- and nothing more, in which case it returns ([terms in first Copar], [terms in second Copar])
+    extractCopar :: [Term] -> ([Term], [Term])
+    extractCopar = ec [] []
+      where
+        ec :: [Term] -> [Term] -> [Term] -> ([Term], [Term])
+        ec [] [] (Copar ts : rest) = ec ts [] rest
+        ec first [] (Copar ts : rest) = ec first ts rest
+        ec first second [] = (first, second)
+        ec _ _ t = ([], [])
+
+    permute :: [Term] -> [Term] -> [[Term]]
+    permute [] [] = []
+    permute as bs =
+      [ [Seq [Copar a, Copar b], Seq [Copar (as \\ a), Copar (bs \\ b)]]
+        | a <- powerset as,
+          b <- powerset bs
+      ]
+
+    powerset :: [a] -> [[a]]
+    powerset [] = [[]]
+    powerset (x : xs) = [x : ps | ps <- powerset xs] ++ powerset xs
+
+reachable :: (Term, String) -> [(Term, String)]
+reachable (t, p) =
+  [(ts, p' ++ "ai-") | ts <- alliDown t]
+    ++ [(ts, p' ++ "ai+") | ts <- alliUp t]
+    ++ [(ts, p' ++ "s") | ts <- switch t]
+    ++ [(ts, p' ++ "q-") | ts <- qDown t]
+    ++ [(ts, p' ++ "q+") | ts <- qUp t]
+  where
+    p' :: String
+    p'
+      | p == "" = ""
+      | otherwise = p ++ ", "
+
+---------------------------------------------------------------------------------
+-----------------------------Proof Search Algorithm------------------------------
+---------------------------------------------------------------------------------
+
+-- Searches for a proof of a given term that can be reached within a specified number of rewrites
+bfs :: Term -> Int -> IO ()
+bfs t n = osearch (concat [doBfs [] (t, "") n' | n' <- [0 .. n]])
+  where
+    -- t is current term, p is path from given term to t
+    doBfs :: [Term] -> (Term, String) -> Int -> [(Term, String)]
+    doBfs seen (t, p) 0
+      | t `elem` seen = []
+      | otherwise = [(t, p)]
+    doBfs seen (t, p) k =
+      reachable (t, p) >>= \(t', p') ->
+        guard (t' `notElem` seen)
+          >> doBfs (t : seen) (t', p') (k - 1)
