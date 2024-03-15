@@ -10,8 +10,10 @@ import Control.Monad (guard)
 import Control.Monad.RWS (MonadIO (liftIO), gets)
 import Data.Char (isLetter)
 import Data.Function (on)
-import Data.List (intercalate, minimumBy, sort, subsequences, (\\))
+import Data.List (find, intercalate, minimumBy, nub, sort, subsequences, (\\))
 import Data.Time (TimeLocale (time12Fmt))
+import Distribution.Simple (ProfDetailLevel (ProfDetailToplevelFunctions))
+import Distribution.Simple.Command (OptDescr (BoolOpt))
 import Distribution.Simple.Utils (xargs)
 import GHC.Exts.Heap (GenClosure (tsoStack))
 import Language.Haskell.TH (safe)
@@ -121,11 +123,21 @@ outputTerms ts "" = intercalate "\n" [outputTerm t | t <- ts]
 
 -- Outputs a proof in a more readable way
 outputProof :: Proof -> IO ()
-outputProof proof = putStrLn ("\n" ++ (intercalate "\n" [outputTerm t ++ ruleUsed p | (t, p) <- proof]) ++ "\n")
+outputProof proof = putStrLn ("\n" ++ (intercalate "\n" [ruleUsed t p ++ outputTerm t | (t, p) <- shift proof ' ']) ++ "\n")
   where
-    ruleUsed :: Char -> String
-    ruleUsed '_' = ""
-    ruleUsed p = "\n---------" ++ [p]
+    ruleUsed :: Term -> Char -> String
+    ruleUsed t p = replicate (length (outputTerm t)) '-' ++ [p] ++ "\n"
+
+    -- Moves all rules down a level and adds the o rule instead to the O term
+    -- Improves readability
+    shift :: Proof -> Char -> Proof
+    shift [] _ = []
+    shift ((t, p) : ps) ' ' = (t, 'o') : shift ps p
+    shift ((t, p) : ps) p' = (t, p') : shift ps p
+
+outputMaybeProof :: Maybe Proof -> IO ()
+outputMaybeProof (Just p) = outputProof p
+outputMaybeProof Nothing = putStrLn "No proof found"
 
 ---------------------------------------------------------------------------------
 ---------------------------Normalise Terms---------------------------------------
@@ -135,20 +147,15 @@ outputProof proof = putStrLn ("\n" ++ (intercalate "\n" [outputTerm t ++ ruleUse
 -- modulo commutativity of par and copar
 (~=) :: Term -> Term -> Bool
 O ~= O = True
-O ~= _ = False
 V x ~= V y = x == y
-V x ~= _ = False
 Not t1 ~= Not t2 = t1 ~= t2
-Not t ~= _ = False
 Seq t1 ~= Seq t2 = length t1 == length t2 && all equivTuple (zip t1 t2)
   where
     equivTuple :: (Term, Term) -> Bool
     equivTuple (t1, t2) = t1 ~= t2
-Seq t ~= _ = False
 Par t1 ~= Par t2 = null (t1 \\ t2) && null (t2 \\ t1) -- equal up to order
-Par t ~= _ = False
 Copar t1 ~= Copar t2 = null (t1 \\ t2) && null (t2 \\ t1) -- equal up to order
-Copar t ~= _ = False
+_ ~= _ = False
 
 (/~=) :: Term -> Term -> Bool
 t1 /~= t2 = not (t1 ~= t2)
@@ -181,12 +188,12 @@ removeId x
         rmv kept (t : ts) = rmv (rmvId t : kept) ts
         rmv kept [] = reverse kept
 
--- Recursively applies de morgan's laws resulting in the only Not terms being variables
+-- Recursively applies de morgan's laws to put a term into negation normal form
 deMorgan :: Term -> Term
 deMorgan x = case x of
-  Not (Seq ts) -> Seq [Not (deMorgan t) | t <- ts]
-  Not (Par ts) -> Copar [Not (deMorgan t) | t <- ts]
-  Not (Copar ts) -> Par [Not (deMorgan t) | t <- ts]
+  Not (Seq ts) -> deMorgan (Seq [Not (deMorgan t) | t <- ts])
+  Not (Par ts) -> deMorgan (Copar [Not (deMorgan t) | t <- ts])
+  Not (Copar ts) -> deMorgan (Par [Not (deMorgan t) | t <- ts])
   Seq ts -> Seq [deMorgan t | t <- ts]
   Par ts -> Par [deMorgan t | t <- ts]
   Copar ts -> Copar [deMorgan t | t <- ts]
@@ -234,40 +241,10 @@ extractSingleton (Copar (t : ts))
   | otherwise = Copar [extractSingleton a | a <- t : ts]
 extractSingleton t = t
 
------------REMOVE??--------------
--- Reorders par and copar structures into a predefined normal form
--- (Copar, Par, Seq, Var, Not Var) using sortTerms
-reorder :: Term -> Term
-reorder x = case x of
-  Seq ts -> Seq [reorder t | t <- ts]
-  Par ts -> Par [reorder t | t <- sortTerms ts]
-  Copar ts -> Copar [reorder t | t <- sortTerms ts]
-  t -> t
-
--- Sorts a list of terms into the normal order
-sortTerms :: [Term] -> [Term]
-sortTerms ts = removeDuplicates (st [] [] [] [] [] ts)
-  where
-    st :: [Term] -> [Term] -> [Term] -> [Term] -> [Term] -> [Term] -> [Term]
-    st s p c v n x = case x of
-      (Seq t : ts) -> st (Seq t : s) p c v n ts
-      (Par t : ts) -> st s (Par t : p) c v n ts
-      (Copar t : ts) -> st s p (Copar t : c) v n ts
-      (V x : ts) -> st s p c (V x : v) n ts
-      (Not (V x) : ts) -> st s p c v (Not (V x) : n) ts
-      [] -> reverse s ++ reverse p ++ reverse c ++ sortVars v ++ sortVars n
-      where
-        sortVars :: [Term] -> [Term]
-        sortVars (V t : ts) = [V x | x <- sort [x | V x <- V t : ts]]
-        sortVars (Not (V t) : ts) = [Not (V x) | x <- sort [x | Not (V x) <- Not (V t) : ts]]
-        sortVars [] = []
-
----------------REMOVE??-------------
-
 -- Applies all of the above functions in order to put any term in its normal form
 -- Defined such that any 2 logically equivalent terms t1 and t2 will satisfy t1 ~= t2 once normalised
 normalise :: Term -> Term
-normalise t = doubleNegative (associate (extractSingleton (deMorgan (removeId t))))
+normalise t = associate (extractSingleton (doubleNegative (deMorgan (removeId t))))
 
 ---------------------------------------------------------------------------------
 -----------------------------Rewrite Rules---------------------------------------
@@ -282,11 +259,6 @@ deepInference ts f = di [] ts f \\ [ts]
     di seen [] f = []
     di seen (t : ts) f = [reverse seen ++ [s] ++ ts | s <- f t] ++ di (t : seen) ts f
 
--- Removes duplicate elements from any list
-removeDuplicates :: Eq a => [a] -> [a]
-removeDuplicates [] = []
-removeDuplicates (x : xs) = x : removeDuplicates (filter (/= x) xs)
-
 -- Returns all lists that can be constructed with any number of elements of the given list
 powerset :: [a] -> [[a]]
 powerset [] = [[]]
@@ -295,16 +267,16 @@ powerset (x : xs) = [x : ps | ps <- powerset xs] ++ powerset xs
 -- Gets a list of every letter that has been used as a variable in a term
 getUsedAtoms :: Term -> [Char]
 getUsedAtoms x = case x of
-  Seq ts -> removeDuplicates (concat [getUsedAtoms t | t <- ts])
-  Par ts -> removeDuplicates (concat [getUsedAtoms t | t <- ts])
-  Copar ts -> removeDuplicates (concat [getUsedAtoms t | t <- ts])
+  Seq ts -> nub (concat [getUsedAtoms t | t <- ts])
+  Par ts -> nub (concat [getUsedAtoms t | t <- ts])
+  Copar ts -> nub (concat [getUsedAtoms t | t <- ts])
   Not (V t) -> [t]
   V t -> [t]
   O -> []
 
 -- Removes a [a, Not a] pair from a Par structure for a specified variable a
-aiDown :: Char -> Term -> Term
-aiDown a (Par ts) = Par (down [] False False a ts)
+oneiDown :: Char -> Term -> Term
+oneiDown a (Par ts) = Par (down [] False False a ts)
   where
     down :: [Term] -> Bool -> Bool -> Char -> [Term] -> [Term]
     down seen False False a (t : ts)
@@ -323,13 +295,13 @@ aiDown a (Par ts) = Par (down [] False False a ts)
       | pos = V a : reverse seen
       | neg = Not (V a) : reverse seen
       | otherwise = reverse seen
-aiDown a t = t
+oneiDown a t = t
 
 -- Adds a Copar pair (a, Not a) to any Par or Copar term; if term is a Seq, will put this pair in
 -- every possible position and return a single Par whose elements are these possible rewrites,
 -- which will then be unpacked by the alliUp function that calls it
-aiUp :: Char -> Term -> Term
-aiUp c t
+oneiUp :: Char -> Term -> Term
+oneiUp c t
   | not (isLetter c && c > 'Z') = error "Invalid rewrite - Variables must be lowercase letters only"
   | otherwise = normalise (up c t)
   where
@@ -343,48 +315,48 @@ aiUp c t
     upSeq c ts = Par [Seq (take n ts ++ [Copar [V c, Not (V c)]] ++ drop n ts) | n <- [0 .. length ts]]
 
 -- Generates a list of all possible aiDown rewrites of a term
-alliDown :: Term -> [Term]
-alliDown x = case x of
+aiDown :: Term -> [Term]
+aiDown x = case x of
   Par ts ->
-    removeDuplicates
+    nub
       ( map
           normalise
-          ( [aiDown a (Par ts) | a <- getUsedAtoms (Par ts)]
-              ++ [Par t | t <- deepInference ts alliDown]
+          ( [oneiDown a (Par ts) | a <- getUsedAtoms (Par ts)]
+              ++ [Par t | t <- deepInference ts aiDown]
           )
       )
       \\ [Par ts]
-  Copar ts -> [normalise (Copar t) | t <- deepInference ts alliDown]
-  Seq ts -> [normalise (Seq t) | t <- deepInference ts alliDown]
+  Copar ts -> nub [normalise (Copar t) | t <- deepInference ts aiDown]
+  Seq ts -> nub [normalise (Seq t) | t <- deepInference ts aiDown]
   t -> []
 
 -- Generates a list of all possible aiUp rewrites of a term
-alliUp :: Term -> [Term]
-alliUp x = case x of
+aiUp :: Term -> [Term]
+aiUp x = case x of
   Seq ts ->
-    removeDuplicates
+    nub
       --   ( map
       --     normalise
-      ( concat [ts | Par ts <- [aiUp a (Seq ts) | a <- getUsedAtoms (Seq ts)]]
-          ++ [Seq t | t <- deepInference ts alliUp]
+      ( concat [ts | Par ts <- [oneiUp a (Seq ts) | a <- getUsedAtoms (Seq ts)]]
+          ++ [Seq t | t <- deepInference ts aiUp]
       )
       --    )
       \\ [Seq ts]
   Par ts ->
-    removeDuplicates
+    nub
       --   ( map
       --      normalise
-      ( [aiUp a (Par ts) | a <- getUsedAtoms (Par ts)]
-          ++ [Par t | t <- deepInference ts alliUp]
+      ( [oneiUp a (Par ts) | a <- getUsedAtoms (Par ts)]
+          ++ [Par t | t <- deepInference ts aiUp]
       )
       --      )
       \\ [Par ts]
   Copar ts ->
-    removeDuplicates
+    nub
       --  ( map
       --      normalise
-      ( [aiUp a (Copar ts) | a <- getUsedAtoms (Copar ts)]
-          ++ [Copar t | t <- deepInference ts alliUp]
+      ( [oneiUp a (Copar ts) | a <- getUsedAtoms (Copar ts)]
+          ++ [Copar t | t <- deepInference ts aiUp]
       )
       --    )
       \\ [Copar ts]
@@ -394,7 +366,7 @@ alliUp x = case x of
 switch :: Term -> [Term]
 switch x = case x of
   Par ts ->
-    removeDuplicates
+    nub
       ( map
           normalise
           ( [Par t | t <- concat [uncurry permute ts' | ts' <- extractCopar ts]]
@@ -402,8 +374,8 @@ switch x = case x of
           )
       )
       \\ [Par ts]
-  Copar ts -> [normalise (Copar t) | t <- deepInference ts switch]
-  Seq ts -> [normalise (Seq t) | t <- deepInference ts switch]
+  Copar ts -> nub [normalise (Copar t) | t <- deepInference ts switch]
+  Seq ts -> nub [normalise (Seq t) | t <- deepInference ts switch]
   t -> []
   where
     -- Returns a list of tuples where each is of the form
@@ -427,7 +399,7 @@ switch x = case x of
 qDown :: Term -> [Term]
 qDown x = case x of
   Par ts ->
-    removeDuplicates
+    nub
       ( map
           normalise
           ( concat [[Par (t' : (ts \\ ts')) | t' <- permute (extractSeqs ts')] | ts' <- powerset ts]
@@ -435,8 +407,8 @@ qDown x = case x of
           )
       )
       \\ [Par ts]
-  Copar ts -> [normalise (Copar t) | t <- deepInference ts qDown]
-  Seq ts -> [normalise (Seq t) | t <- deepInference ts qDown]
+  Copar ts -> nub [normalise (Copar t) | t <- deepInference ts qDown]
+  Seq ts -> nub [normalise (Seq t) | t <- deepInference ts qDown]
   t -> []
   where
     -- Returns a list of all sublists that begin with the first element
@@ -467,16 +439,17 @@ qDown x = case x of
           | (as, bs) <- ts
         ]
 
+-- CURRENTLY USING THIS
 qDown' :: Term -> [Term]
 qDown' x = case x of
   Par ts ->
-    removeDuplicates
+    nub
       ( concat [[normalise (Par (t' : (ts \\ subset))) | t' <- makeSeq subset] | subset <- powerset ts]
           ++ [normalise (Par t) | t <- deepInference ts qDown']
       )
       \\ [Par ts]
-  Copar ts -> [normalise (Copar t) | t <- deepInference ts qDown']
-  Seq ts -> [normalise (Seq t) | t <- deepInference ts qDown']
+  Copar ts -> nub [normalise (Copar t) | t <- deepInference ts qDown']
+  Seq ts -> nub [normalise (Seq t) | t <- deepInference ts qDown']
   t -> []
   where
     getSublists :: [a] -> [[a]]
@@ -509,7 +482,7 @@ qDown' x = case x of
 qUp :: Term -> [Term]
 qUp x = case x of
   Seq ts ->
-    removeDuplicates
+    nub
       ( map
           normalise
           ( [Copar t | t <- uncurry permute (extractCopar ts)]
@@ -517,8 +490,8 @@ qUp x = case x of
           )
       )
       \\ [Seq ts]
-  Copar ts -> [normalise (Copar t) | t <- deepInference ts qUp]
-  Par ts -> [normalise (Par t) | t <- deepInference ts qUp]
+  Copar ts -> nub [normalise (Copar t) | t <- deepInference ts qUp]
+  Par ts -> nub [normalise (Par t) | t <- deepInference ts qUp]
   t -> []
   where
     -- Given a list of terms, returns ([],[]) unless the list is precicely 2 Copar structures
@@ -551,10 +524,10 @@ qUp x = case x of
 -- Finds all single step rewrites of a possible term, and records which rule was used to get there
 reachable :: (Term, Char) -> [(Term, Char)]
 reachable (t, p) =
-  removeDuplicates
+  nub
     ( -- commented out up for development purposes
-      [(ts, 'a') | ts <- alliDown t]
-        -- ++ [(ts, 'A') | ts <- alliUp t]
+      [(ts, 'a') | ts <- aiDown t]
+        -- ++ [(ts, 'A') | ts <- aiUp t]
         ++ [(ts, 's') | ts <- switch t]
         -- ++ [(ts, 'Q') | ts <- qUp t]
         ++ [(ts, 'q') | ts <- qDown' t]
@@ -570,6 +543,7 @@ lenTerm x = case x of
   V v -> 1
   O -> 0
 
+-- CURRENTLY UNUSED
 proofSearch :: Term -> [Proof]
 proofSearch t = doBfsearch [] [(t, '_')] -- minimumBy (compare `on` length)
   where
@@ -582,6 +556,22 @@ proofSearch t = doBfsearch [] [(t, '_')] -- minimumBy (compare `on` length)
             [ doBfsearch (fst (proof !! 0) : seen) proof'
               | proof' <- [(t, p) : proof | (t, p) <- reachable (proof !! 0)]
             ]
+
+slightlyBetterBfs :: Term -> Maybe Proof
+slightlyBetterBfs start = loop [[(start, '_')]] []
+  where
+    loop :: [Proof] -> [Term] -> Maybe Proof
+    loop frontier seen
+      | any isDone frontier = find isDone frontier
+      | otherwise =
+          loop
+            (filter (\p -> notElem (fst (p !! 0)) seen) rs)
+            (seen ++ [fst (r !! 0) | r <- rs])
+      where
+        rs = nub $ concat [[r : p | r <- reachable (p !! 0)] | p <- frontier]
+
+    isDone :: Proof -> Bool
+    isDone p = fst (p !! 0) == O
 
 prove :: IO ()
 prove = runInputT defaultSettings prv
