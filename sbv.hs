@@ -12,7 +12,8 @@ import Data.Char (isLetter)
 import Data.Function (on)
 import Data.List (find, intercalate, minimumBy, nub, sort, subsequences, (\\))
 import Data.Time (TimeLocale (time12Fmt))
-import Distribution.Simple (ProfDetailLevel (ProfDetailToplevelFunctions))
+import Distribution.SPDX (LicenseId (OCCT_PL))
+import Distribution.Simple (ProfDetailLevel (ProfDetailToplevelFunctions), defaultMainNoRead)
 import Distribution.Simple.Command (OptDescr (BoolOpt))
 import Distribution.Simple.Utils (xargs)
 import GHC.Exts.Heap (GenClosure (tsoStack))
@@ -24,6 +25,7 @@ import System.Console.Haskeline
     outputStrLn,
     runInputT,
   )
+import System.Posix (ProcessStatus (Terminated))
 import Text.Read (Lexeme (String))
 
 data Term = O | V Char | Not Term | Seq [Term] | Par [Term] | Copar [Term]
@@ -51,7 +53,7 @@ parse x = case x of
   '<' : xs -> parseSeq 0 [] [] xs
   '[' : xs -> parsePar 0 [] [] xs
   '(' : xs -> parseCopar 0 [] [] xs
-  str -> error "Invalid expression - invalid sequence of characters"
+  _ -> error "Invalid expression - invalid sequence of characters"
   where
     -- Checks that a character is a lowercase letter
     parseVar :: Char -> Term
@@ -68,7 +70,8 @@ parse x = case x of
     parseSeq :: Int -> [Term] -> [Char] -> String -> Term
     parseSeq 0 ts ys (x : xs)
       | x == '<' = parseSeq 1 ts (x : ys) xs
-      | x == '>' = Seq (reverse (parse (reverse ys) : ts))
+      | x == '>' && null xs = Seq (reverse (parse (reverse ys) : ts))
+      | x == '>' = error "Invalid expression - invalid sequence of characters"
       | x == ';' = parseSeq 0 (parse (reverse ys) : ts) [] xs
       | otherwise = parseSeq 0 ts (x : ys) xs
     parseSeq n ts ys (x : xs)
@@ -81,7 +84,8 @@ parse x = case x of
     parsePar 0 ts ys (x : xs)
       | x == '(' = parsePar 1 ts (x : ys) xs
       | x == '[' = parsePar 1 ts (x : ys) xs
-      | x == ']' = Par (reverse (parse (reverse ys) : ts))
+      | x == ']' && null xs = Par (reverse (parse (reverse ys) : ts))
+      | x == ']' = error "Invalid expression - invalid sequence of characters"
       | x == ',' = parsePar 0 (parse (reverse ys) : ts) [] xs
       | otherwise = parsePar 0 ts (x : ys) xs
     parsePar n ts ys (x : xs)
@@ -96,7 +100,8 @@ parse x = case x of
     parseCopar 0 ts ys (x : xs)
       | x == '(' = parseCopar 1 ts (x : ys) xs
       | x == '[' = parseCopar 1 ts (x : ys) xs
-      | x == ')' = Copar (reverse (parse (reverse ys) : ts))
+      | x == ')' && null xs = Copar (reverse (parse (reverse ys) : ts))
+      | x == ')' = error "Invalid expression - invalid sequence of characters"
       | x == ',' = parseCopar 0 (parse (reverse ys) : ts) [] xs
       | otherwise = parseCopar 0 ts (x : ys) xs
     parseCopar n ts ys (x : xs)
@@ -132,7 +137,7 @@ outputProof proof = putStrLn ("\n" ++ (intercalate "\n" [ruleUsed t p ++ outputT
     -- Improves readability
     shift :: Proof -> Char -> Proof
     shift [] _ = []
-    shift ((t, p) : ps) ' ' = (t, 'o') : shift ps p
+    shift ((t, p) : ps) ' ' = (O, 'o') : shift ps p
     shift ((t, p) : ps) p' = (t, p') : shift ps p
 
 outputMaybeProof :: Maybe Proof -> IO ()
@@ -143,10 +148,13 @@ outputMaybeProof Nothing = putStrLn "No proof found"
 ---------------------------Equivalence-------------------------------------------
 ---------------------------------------------------------------------------------
 
--- Infix functions to check 2 terms are equivalent/ not equivalent
+-- Infix functions to check 2 preprocessed terms are equivalent/ not equivalent
 -- modulo commutativity of par and copar
 (~=) :: Term -> Term -> Bool
 O ~= O = True
+Seq [] ~= O = True
+Par [] ~= O = True
+Copar [] ~= O = True
 V x ~= V y = x == y
 Not t1 ~= Not t2 = t1 ~= t2
 Seq t1 ~= Seq t2 = length t1 == length t2 && all equivTuple (zip t1 t2)
@@ -160,44 +168,37 @@ _ ~= _ = False
 (/~=) :: Term -> Term -> Bool
 t1 /~= t2 = not (t1 ~= t2)
 
--- Removes any lone O terms and empty sequences from inside a Seq, Par, or Copar
 removeId :: Term -> Term
-removeId x
-  | x == y = x
-  | otherwise = removeId y
-  where
-    y = rmvId x
-
-    -- Iteratively applies this function until the result is unchanged
-    rmvId :: Term -> Term
-    rmvId x = case x of
-      Seq [] -> O
-      Par [] -> O
-      Copar [] -> O
-      Seq ts -> Seq (rmv [] ts)
-      Par ts -> Par (rmv [] ts)
-      Copar ts -> Copar (rmv [] ts)
-      Not ts -> Not (rmvId ts)
-      t -> t
-      where
-        rmv :: [Term] -> [Term] -> [Term]
-        rmv kept (O : ts) = rmv kept ts
-        rmv kept (Seq [] : ts) = rmv kept ts
-        rmv kept (Par [] : ts) = rmv kept ts
-        rmv kept (Copar [] : ts) = rmv kept ts
-        rmv kept (t : ts) = rmv (rmvId t : kept) ts
-        rmv kept [] = reverse kept
-
--- Recursively applies de morgan's laws to put a term into negation normal form
-deMorgan :: Term -> Term
-deMorgan x = case x of
-  Not (Seq ts) -> deMorgan (Seq [Not (deMorgan t) | t <- ts])
-  Not (Par ts) -> deMorgan (Copar [Not (deMorgan t) | t <- ts])
-  Not (Copar ts) -> deMorgan (Par [Not (deMorgan t) | t <- ts])
-  Seq ts -> Seq [deMorgan t | t <- ts]
-  Par ts -> Par [deMorgan t | t <- ts]
-  Copar ts -> Copar [deMorgan t | t <- ts]
+removeId x = case x of
+  Seq ts -> Seq (filter (/= O) (map removeId ts))
+  Par ts -> Par (filter (/= O) (map removeId ts))
+  Copar ts -> Copar (filter (/= O) (map removeId ts))
+  Not t -> Not (removeId t)
   t -> t
+
+-- Puts a term into negation normal form
+negationNormal :: Term -> Term
+negationNormal t = doubleNegative (deMorgan (doubleNegative t))
+  where
+    -- Recursively applies De Morgan's laws to push negation to atoms
+    deMorgan :: Term -> Term
+    deMorgan x = case x of
+      Not (Seq ts) -> deMorgan (Seq [Not (deMorgan t) | t <- ts])
+      Not (Par ts) -> deMorgan (Copar [Not (deMorgan t) | t <- ts])
+      Not (Copar ts) -> deMorgan (Par [Not (deMorgan t) | t <- ts])
+      Seq ts -> Seq [deMorgan t | t <- ts]
+      Par ts -> Par [deMorgan t | t <- ts]
+      Copar ts -> Copar [deMorgan t | t <- ts]
+      t -> t
+
+    -- Removes double negatives
+    doubleNegative :: Term -> Term
+    doubleNegative x = case x of
+      Not (Not t) -> doubleNegative t
+      Seq ts -> Seq [doubleNegative t | t <- ts]
+      Par ts -> Par [doubleNegative t | t <- ts]
+      Copar ts -> Copar [doubleNegative t | t <- ts]
+      t -> t
 
 -- Flattens instances of a structure nested within the same structure
 associate :: Term -> Term
@@ -219,15 +220,6 @@ associate x = case x of
     unCopar (Copar ts) = concat [unCopar t | t <- ts]
     unCopar t = [associate t]
 
--- Removes double negatives
-doubleNegative :: Term -> Term
-doubleNegative x = case x of
-  Not (Not t) -> doubleNegative t
-  Seq ts -> Seq [doubleNegative t | t <- ts]
-  Par ts -> Par [doubleNegative t | t <- ts]
-  Copar ts -> Copar [doubleNegative t | t <- ts]
-  t -> t
-
 -- Any singleton structures are replaced by just the element itself
 extractSingleton :: Term -> Term
 extractSingleton (Seq (t : ts))
@@ -244,7 +236,7 @@ extractSingleton t = t
 -- Applies all of the above functions in order to put any term in its normal form
 -- Defined such that any 2 logically equivalent terms t1 and t2 will satisfy t1 ~= t2 once normalised
 preprocess :: Term -> Term
-preprocess t = associate (extractSingleton (doubleNegative (deMorgan (removeId t))))
+preprocess t = associate (extractSingleton (negationNormal (removeId t)))
 
 ---------------------------------------------------------------------------------
 -----------------------------Rewrite Rules---------------------------------------
@@ -320,13 +312,15 @@ oneiUp c t
 aiDown :: Term -> [Term]
 aiDown x = case x of
   Par ts ->
-    map
-      preprocess
-      ( concat [oneiDown a (Par ts) | a <- getUsedAtoms (Par ts)]
-          ++ [Par t | t <- deepInference ts aiDown]
+    nub
+      ( map
+          preprocess
+          ( concat [oneiDown a (Par ts) | a <- getUsedAtoms (Par ts)]
+              ++ [Par t | t <- deepInference ts aiDown]
+          )
       )
-  Copar ts -> [Copar t | t <- deepInference ts aiDown]
-  Seq ts -> [Seq t | t <- deepInference ts aiDown]
+  Copar ts -> nub [preprocess (Copar t) | t <- deepInference ts aiDown]
+  Seq ts -> nub [preprocess (Seq t) | t <- deepInference ts aiDown]
   t -> []
 
 -- Generates a list of all possible aiUp rewrites of a term
@@ -351,7 +345,7 @@ switch x = case x of
       ( map
           preprocess
           ( concat [permute ts' | ts' <- extractCopar ts]
-              -- ++ degenerate ts
+              ++ degenerate ts
               ++ [Par t | t <- deepInference ts switch]
           )
       )
@@ -372,24 +366,25 @@ switch x = case x of
 
     permute :: ([Term], [Term]) -> [Term]
     permute (as, bs) =
-      [ Par (Copar [Par [Copar a, Par b], Copar (as \\ a)] : (bs \\ b))
+      [ Par (Copar (Par (Copar a : b) : (as \\ a)) : (bs \\ b))
         | a <- powerset as,
           b <- powerset bs
       ]
-    -- Par (Copar (Par (Copar a : b) : (as \\ a)) : (bs \\ b))
+
     degenerate :: [Term] -> [Term]
     degenerate ts = [Par (Copar ts' : (ts \\ ts')) | ts' <- powerset ts]
 
 -- Generates a list of all possible single step qDown applications of a term
--- CURRENTLY UNUSED
 qDown :: Term -> [Term]
 qDown x = case x of
   Par ts ->
     nub
       ( map
           preprocess
-          ( concat [[Par (t' : (ts \\ ts')) | t' <- permute (extractSeqs ts')] | ts' <- powerset ts]
-              ++ [Par t | t <- deepInference ts qDown]
+          ( noSeq ts
+              ++ oneSeq ts
+              ++ twoSeq ts
+              ++ [preprocess (Par t) | t <- deepInference ts qDown]
           )
       )
       \\ [Par ts]
@@ -397,72 +392,28 @@ qDown x = case x of
   Seq ts -> nub [preprocess (Seq t) | t <- deepInference ts qDown]
   t -> []
   where
-    -- Returns a list of all sublists that begin with the first element
-    getSublists :: [a] -> [[a]]
-    getSublists [] = []
-    getSublists (x : xs) = [x] : [x : ys | ys <- getSublists xs]
-
-    extractSeqs :: [Term] -> [([Term], [Term])]
-    extractSeqs ts = es [] [] ts ++ [([Par t], [Par (ts \\ t)]) | t <- powerset ts]
-      where
-        -- Seperates list of terms into
-        es :: [[Term]] -> [Term] -> [Term] -> [([Term], [Term])]
-        es seqs [] [Seq ts, Seq ts'] = [(ts, ts')]
-        es seqs seen (Seq ts : unseen) = es (ts : seqs) seen unseen
-        es seqs seen (x : unseen) = es seqs (x : seen) unseen
-        es seqs seen [] =
-          [ (s, [Par ([Seq s' | s' <- seqs \\ [s]] ++ seen)])
-            | s <- seqs
-          ]
-
-    permute :: [([Term], [Term])] -> [Term]
-    permute ts =
+    noSeq :: [Term] -> [Term]
+    noSeq ts =
       concat
-        [ [ Seq [Par [Seq a, Seq b], Par [Seq (as \\ a), Seq (bs \\ b)]]
-            | a <- getSublists as,
-              b <- getSublists bs
-          ]
-          | (as, bs) <- ts
-        ]
-
--- CURRENTLY USING THIS
-qDown' :: Term -> [Term]
-qDown' x = case x of
-  Par ts ->
-    nub
-      ( concat [[preprocess (Par (t' : (ts \\ subset))) | t' <- makeSeq subset] | subset <- powerset ts]
-          ++ [preprocess (Par t) | t <- deepInference ts qDown']
-      )
-      \\ [Par ts]
-  Copar ts -> nub [preprocess (Copar t) | t <- deepInference ts qDown']
-  Seq ts -> nub [preprocess (Seq t) | t <- deepInference ts qDown']
-  t -> []
-  where
-    getSublists :: [a] -> [[a]]
-    getSublists [] = []
-    getSublists (x : xs) = [x] : [x : ys | ys <- getSublists xs]
-
-    makeSeq :: [Term] -> [Term]
-    makeSeq ts = map preprocess (permute (extractSeqs ts))
-      where
-        extractSeqs :: [Term] -> [([Term], [Term])]
-        extractSeqs = es []
-          where
-            es :: [[Term]] -> [Term] -> [([Term], [Term])]
-            es [] [Seq ts, Seq ts'] = [(ts, ts')]
-            es seqs (Seq ts : unseen) = es (ts : seqs) unseen
-            es seqs (x : unseen) = es ([O, x, O] : seqs) unseen
-            es seqs [] = [(s, [Par [Seq s' | s' <- seqs \\ [s]]]) | s <- seqs]
-
-        permute :: [([Term], [Term])] -> [Term]
-        permute ts =
-          concat
-            [ [ preprocess (Seq [Par [Seq a, Seq b], Par [Seq (as \\ a), Seq (bs \\ b)]])
-                | a <- getSublists as,
-                  b <- getSublists bs
+        ( concat
+            [ [ [ Par (Seq [Par (as \\ bs), Par bs] : (ts \\ as)),
+                  Par (Seq [Par bs, Par (as \\ bs)] : (ts \\ as))
+                ]
+                | bs <- powerset as
               ]
-              | (as, bs) <- ts
+              | as <- powerset ts
             ]
+        )
+    oneSeq :: [Term] -> [Term]
+    oneSeq ts = []
+
+    twoSeq :: [Term] -> [Term]
+    twoSeq ts = []
+
+    getSeqs :: [Term] -> [[Term]]
+    getSeqs [] = []
+    getSeqs ((Seq t) : ts) = t : getSeqs ts
+    getSeqs (t : ts) = getSeqs ts
 
 -- Generates a list of all possible single step qUp applications of a term
 qUp :: Term -> [Term]
@@ -516,7 +467,7 @@ reachable t =
         -- ++ [(ts, 'A') | ts <- aiUp t]
         ++ [(ts, 's') | ts <- switch t]
         -- ++ [(ts, 'Q') | ts <- qUp t]
-        ++ [(ts, 'q') | ts <- qDown' t]
+        ++ [(ts, 'q') | ts <- qDown t]
     )
 
 -- CURRENTLY UNUSED
@@ -529,7 +480,6 @@ lenTerm x = case x of
   V v -> 1
   O -> 0
 
--- CURRENTLY UNUSED
 proofSearch :: Term -> [Proof]
 proofSearch t = doBfsearch [] [(t, '_')]
   where
@@ -573,6 +523,9 @@ prove = runInputT defaultSettings prv
 
 motivate :: IO ()
 motivate = putStrLn "you got this <3"
+
+rab :: String -> [Term]
+rab t = map fst (reachable (preprocess (parse t)))
 
 {-
 Testing material
