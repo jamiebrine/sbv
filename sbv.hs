@@ -111,7 +111,7 @@ parse x = case x of
       | x == '[' = parseCopar (n + 1) ts (x : ys) xs
       | otherwise = parseCopar n ts (x : ys) xs
 
--- Outputs a term as a string, acting as a logical inverse to the parse function
+-- Outputs a Term as a string, acting as a logical inverse to the parse function
 outputTerm :: Term -> String
 outputTerm x = case x of
   O -> "O"
@@ -121,7 +121,7 @@ outputTerm x = case x of
   Par xs -> "[" ++ intercalate "," [outputTerm x | x <- xs] ++ "]"
   Copar xs -> "(" ++ intercalate "," [outputTerm x | x <- xs] ++ ")"
 
--- Outputs a list of terms in a more readable way
+-- Outputs a list of Terms in a more readable way
 outputTerms :: [Term] -> ShowS
 outputTerms [] "" = "None"
 outputTerms ts "" = intercalate "\n" [outputTerm t | t <- ts]
@@ -133,7 +133,7 @@ outputProof proof = putStrLn ("\n" ++ (intercalate "\n" [ruleUsed t p ++ outputT
     ruleUsed :: Term -> Char -> String
     ruleUsed t p = replicate (length (outputTerm t)) '-' ++ [p] ++ "\n"
 
-    -- Moves all rules down a level and adds the o rule instead to the O term
+    -- Moves all rules down a level and adds the o rule instead to the O Term
     -- Improves readability
     shift :: Proof -> Char -> Proof
     shift [] _ = []
@@ -148,7 +148,7 @@ outputMaybeProof Nothing = putStrLn "No proof found"
 ---------------------------Equivalence-------------------------------------------
 ---------------------------------------------------------------------------------
 
--- Infix functions to check 2 preprocessed terms are equivalent/ not equivalent
+-- Infix functions to check 2 preprocessed Terms are equivalent/ not equivalent
 -- modulo commutativity of par and copar
 (~=) :: Term -> Term -> Bool
 O ~= O = True
@@ -176,7 +176,7 @@ removeId x = case x of
   Not t -> Not (removeId t)
   t -> t
 
--- Puts a term into negation normal form
+-- Puts a Term into negation normal form
 negationNormal :: Term -> Term
 negationNormal t = doubleNegative (deMorgan (doubleNegative t))
   where
@@ -233,8 +233,8 @@ extractSingleton (Copar (t : ts))
   | otherwise = Copar [extractSingleton a | a <- t : ts]
 extractSingleton t = t
 
--- Applies all of the above functions in order to put any term in its normal form
--- Defined such that any 2 logically equivalent terms t1 and t2 will satisfy t1 ~= t2 once normalised
+-- Applies all of the above functions in order to put any Term in its normal form
+-- Defined such that any 2 logically equivalent Terms t1 and t2 will satisfy t1 ~= t2 once normalised
 preprocess :: Term -> Term
 preprocess t = associate (extractSingleton (negationNormal (removeId t)))
 
@@ -259,7 +259,7 @@ powerset x = nub (pows x)
     pows [] = [[]]
     pows (x : xs) = [x : ps | ps <- pows xs] ++ pows xs
 
--- Gets a list of every letter that has been used as a variable in a term
+-- Gets a list of every letter that has been used as a variable in a Term
 getUsedAtoms :: Term -> [Char]
 getUsedAtoms x = case x of
   O -> []
@@ -291,7 +291,7 @@ oneiDown a (Par ts)
     down _ _ _ _ [] = []
 oneiDown _ _ = []
 
--- Adds a Copar pair (a, Not a) to any Par or Copar term; if term is a Seq, will put this pair in
+-- Adds a Copar pair (a, Not a) to any Par or Copar Term; if Term is a Seq, will put this pair in
 -- every possible position
 oneiUp :: Char -> Term -> [Term]
 oneiUp c t
@@ -308,7 +308,7 @@ oneiUp c t
       Copar ts -> [Copar (ts ++ [V c, Not (V c)])]
       t -> [Copar [t, V c, Not (V c)]] -- currently not allowing this case in aiUp
 
--- Generates a list of all possible aiDown rewrites of a term
+-- Generates a list of all possible aiDown rewrites of a Term
 aiDown :: Term -> [Term]
 aiDown x = case x of
   Par ts ->
@@ -323,7 +323,7 @@ aiDown x = case x of
   Seq ts -> nub [preprocess (Seq t) | t <- deepInference ts aiDown]
   t -> []
 
--- Generates a list of all possible aiUp rewrites of a term
+-- Generates a list of all possible aiUp rewrites of a Term
 aiUp :: Term -> [Term]
 aiUp x = case x of
   Seq ts ->
@@ -337,25 +337,27 @@ aiUp x = case x of
       ++ [Copar t | t <- deepInference ts aiUp]
   t -> []
 
--- Generates a list of all possible single step switches of a term
+-- Generates a list of all possible single step switches of a Term
 switch :: Term -> [Term]
 switch x = case x of
   Par ts ->
-    nub
-      ( map
-          preprocess
-          ( concat [permute ts' | ts' <- extractCopar ts]
-              ++ degenerate ts
-              ++ [Par t | t <- deepInference ts switch]
-          )
-      )
-      \\ [Par ts]
+    swtch ts ++ [preprocess (Par t) | t <- deepInference ts switch]
   Copar ts -> nub [preprocess (Copar t) | t <- deepInference ts switch]
   Seq ts -> nub [preprocess (Seq t) | t <- deepInference ts switch]
   t -> []
   where
+    swtch :: [Term] -> [Term]
+    swtch ts =
+      nub
+        ( map
+            preprocess
+            ( concat [permute ts' | ts' <- extractCopar ts]
+                ++ degenerate ts
+            )
+        )
+        \\ [Par ts]
     -- Returns a list of tuples where each is of the form
-    -- ([Terms inside a copar element of the given list],[All other terms])
+    -- ([Terms inside a copar element of the given list],[All other Terms])
     extractCopar :: [Term] -> [([Term], [Term])]
     extractCopar = ec []
       where
@@ -374,24 +376,29 @@ switch x = case x of
     degenerate :: [Term] -> [Term]
     degenerate ts = [Par (Copar ts' : (ts \\ ts')) | ts' <- powerset ts]
 
--- Generates a list of all possible single step qDown applications of a term
+-- Generates a list of all possible single step qDown applications of a Term
 qDown :: Term -> [Term]
 qDown x = case x of
   Par ts ->
-    nub
-      ( map
-          preprocess
-          ( noSeq ts
-              ++ oneSeq ts
-              ++ twoSeq ts
-              ++ [preprocess (Par t) | t <- deepInference ts qDown]
-          )
-      )
-      \\ [Par ts]
+    qd ts ++ nub [preprocess (Par t) | t <- deepInference ts qDown]
   Copar ts -> nub [preprocess (Copar t) | t <- deepInference ts qDown]
   Seq ts -> nub [preprocess (Seq t) | t <- deepInference ts qDown]
   t -> []
   where
+    qd :: [Term] -> [Term]
+    qd ts =
+      nub
+        ( map
+            preprocess
+            ( noSeq ts
+                ++ oneSeq ts
+                ++ twoSeq ts
+            )
+        )
+        \\ [Par ts]
+
+    -- Split any Par Term into 3 (possibly empty) parts, impose an ordering on two of them,
+    -- and put that ordering inside of a Par context with the third
     noSeq :: [Term] -> [Term]
     noSeq ts =
       concat
@@ -404,18 +411,51 @@ qDown x = case x of
               | as <- powerset ts
             ]
         )
-    oneSeq :: [Term] -> [Term]
-    oneSeq ts = []
 
+    -- For each proper seq substructure of an arbitrary par structure, splits said seq substructure
+    -- into 2 (possibly empty) ordered parts ⟨A⟩, ⟨B⟩, splits the remaining elements of the par into
+    -- 2 (possibly empty) parts [C], [D], and return two rewrites [⟨[⟨A⟩C];B⟩,D] and [⟨A;[⟨B⟩,C]⟩,D]
+    oneSeq :: [Term] -> [Term]
+    oneSeq ts = concat [oseq t (ts \\ [Seq t]) | t <- getSeqs ts]
+      where
+        oseq :: [Term] -> [Term] -> [Term]
+        oseq seqs ts =
+          concat
+            [ [ Par (Seq (Par (Seq s : t) : (seqs \\ s)) : (ts \\ t)),
+                Par (Seq (s ++ [Par (Seq (seqs \\ s) : t)]) : (ts \\ t))
+              ]
+              | s <- orderedSplit seqs,
+                t <- powerset ts
+            ]
+
+    -- For each pair of proper seq sub
     twoSeq :: [Term] -> [Term]
-    twoSeq ts = []
+    twoSeq ts = concat [tseq a b (ts \\ [Seq a, Seq b]) | (a, b) <- takeTwo (getSeqs ts)]
+      where
+        tseq :: [Term] -> [Term] -> [Term] -> [Term]
+        tseq a b ts =
+          [ Par (Seq [Par [Seq as, Seq bs], Par [Seq (a \\ as), Seq (b \\ bs)]] : ts)
+            | as <- orderedSplit a,
+              bs <- orderedSplit b
+          ]
+
+        takeTwo :: [a] -> [(a, a)]
+        takeTwo [] = []
+        takeTwo (t : ts) = [(t, t') | t' <- ts] ++ takeTwo ts
 
     getSeqs :: [Term] -> [[Term]]
     getSeqs [] = []
     getSeqs ((Seq t) : ts) = t : getSeqs ts
     getSeqs (t : ts) = getSeqs ts
 
--- Generates a list of all possible single step qUp applications of a term
+    orderedSplit :: [a] -> [[a]]
+    orderedSplit = os []
+      where
+        os :: [a] -> [a] -> [[a]]
+        os seen [] = [reverse seen]
+        os seen (s : seqs) = reverse seen : os (s : seen) seqs
+
+-- Generates a list of all possible single step qUp applications of a Term
 qUp :: Term -> [Term]
 qUp x = case x of
   Seq ts ->
@@ -431,8 +471,8 @@ qUp x = case x of
   Par ts -> nub [preprocess (Par t) | t <- deepInference ts qUp]
   t -> []
   where
-    -- Given a list of terms, returns ([],[]) unless the list is precicely 2 Copar structures
-    -- and nothing more, in which case it returns ([terms in first Copar], [terms in second Copar])
+    -- Given a list of Terms, returns ([],[]) unless the list is precicely 2 Copar structures
+    -- and nothing more, in which case it returns ([Terms in first Copar], [Terms in second Copar])
     extractCopar :: [Term] -> ([Term], [Term])
     extractCopar = ec [] []
       where
@@ -458,7 +498,7 @@ qUp x = case x of
 -----------------------------Proof Search Algorithm------------------------------
 ---------------------------------------------------------------------------------
 
--- Finds all single step rewrites of a possible term, and records which rule was used to get there
+-- Finds all single step rewrites of a possible Term, and records which rule was used to get there
 reachable :: Term -> [(Term, Char)]
 reachable t =
   nub
