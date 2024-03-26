@@ -380,13 +380,13 @@ switch x = case x of
 qDown :: Term -> [Term]
 qDown x = case x of
   Par ts ->
-    qd ts ++ nub [preprocess (Par t) | t <- deepInference ts qDown]
+    qdwn ts ++ nub [preprocess (Par t) | t <- deepInference ts qDown]
   Copar ts -> nub [preprocess (Copar t) | t <- deepInference ts qDown]
   Seq ts -> nub [preprocess (Seq t) | t <- deepInference ts qDown]
   t -> []
   where
-    qd :: [Term] -> [Term]
-    qd ts =
+    qdwn :: [Term] -> [Term]
+    qdwn ts =
       nub
         ( map
             preprocess
@@ -428,7 +428,8 @@ qDown x = case x of
                 t <- powerset ts
             ]
 
-    -- For each pair of proper seq sub
+    -- For each pair of proper seq substructures of an arbitrary par structure, splits the first
+    -- into 2 (possibly empty) ordered parts ⟨A⟩, ⟨B⟩, the second into similar <C>, <D>,
     twoSeq :: [Term] -> [Term]
     twoSeq ts = concat [tseq a b (ts \\ [Seq a, Seq b]) | (a, b) <- takeTwo (getSeqs ts)]
       where
@@ -455,44 +456,40 @@ qDown x = case x of
         os seen [] = [reverse seen]
         os seen (s : seqs) = reverse seen : os (s : seen) seqs
 
--- Generates a list of all possible single step qUp applications of a Term
+-- Generates a list of all possible single step qDown applications of a Term
 qUp :: Term -> [Term]
 qUp x = case x of
   Seq ts ->
-    nub
-      ( map
-          preprocess
-          ( [Copar t | t <- uncurry permute (extractCopar ts)]
-              ++ [Seq t | t <- deepInference ts qUp]
-          )
-      )
-      \\ [Seq ts]
-  Copar ts -> nub [preprocess (Copar t) | t <- deepInference ts qUp]
+    qp ts ++ nub [preprocess (Seq t) | t <- deepInference ts qUp]
   Par ts -> nub [preprocess (Par t) | t <- deepInference ts qUp]
+  Copar ts -> nub [preprocess (Copar t) | t <- deepInference ts qUp]
   t -> []
   where
-    -- Given a list of Terms, returns ([],[]) unless the list is precicely 2 Copar structures
-    -- and nothing more, in which case it returns ([Terms in first Copar], [Terms in second Copar])
-    extractCopar :: [Term] -> ([Term], [Term])
-    extractCopar = ec [] []
-      where
-        ec :: [Term] -> [Term] -> [Term] -> ([Term], [Term])
-        ec [] [] (Copar ts : rest) = ec ts [] rest
-        ec first [] (Copar ts : rest) = ec first ts rest
-        ec first second [] = (first, second)
-        ec _ _ t = ([], [])
+    qp :: [Term] -> [Term]
+    qp ts =
+      nub
+        ( map
+            preprocess
+            ( noCopar ts
+                ++ oneCopar ts
+                ++ twoCopar ts
+            )
+        )
+        \\ [Par ts]
 
-    permute :: [Term] -> [Term] -> [[Term]]
-    permute [] [] = []
-    permute as bs =
-      [ [Seq [Copar a, Copar b], Seq [Copar (as \\ a), Copar (bs \\ b)]]
-        | a <- powerset as,
-          b <- powerset bs
-      ]
+    noCopar :: [Term] -> [Term]
+    noCopar _ = []
 
-    powerset :: [a] -> [[a]]
-    powerset [] = [[]]
-    powerset (x : xs) = [x : ps | ps <- powerset xs] ++ powerset xs
+    oneCopar :: [Term] -> [Term]
+    oneCopar _ = []
+
+    twoCopar :: [Term] -> [Term]
+    twoCopar _ = []
+
+    getCopars :: [Term] -> [[Term]]
+    getCopars [] = []
+    getCopars ((Copar t) : ts) = t : getCopars ts
+    getCopars (t : ts) = getCopars ts
 
 ---------------------------------------------------------------------------------
 -----------------------------Proof Search Algorithm------------------------------
@@ -533,8 +530,8 @@ proofSearch t = doBfsearch [] [(t, '_')]
               | proof' <- [(t, p) : proof | (t, p) <- reachable (fst (proof !! 0))]
             ]
 
-slightlyBetterBfs :: Term -> Maybe Proof
-slightlyBetterBfs start = loop [[(start, '_')]] [] -- minimumBy (compare `on` length)
+bfs :: Term -> Maybe Proof
+bfs start = loop [[(start, '_')]] [] -- minimumBy (compare `on` length)
   where
     loop :: [Proof] -> [Term] -> Maybe Proof
     loop frontier seen
@@ -557,7 +554,7 @@ prove = runInputT defaultSettings prv
       input <- getInputLine "Enter SBV structure to prove:\n"
       outputStrLn "Searching for proof..."
       case input of
-        Just x -> liftIO (mapM_ outputProof (proofSearch (preprocess (parse x))))
+        Just x -> liftIO (mapM_ outputProof (bfs (preprocess (parse x))))
         Nothing -> outputStrLn "Invalid input - ????"
       outputStrLn "Proof search finished"
 
@@ -571,8 +568,8 @@ rab t = map fst (reachable (preprocess (parse t)))
 Testing material
 
 1: [(a,b),-a,-b]
-2: [<a;(b,-a)>,[b,a,-a]]
-3: [<a;(b,c);d>,<[-a,-b];-d>,c]
+2: [<a;(b,-a)>,[-b,a,-a]]
+3: [<a;(b,c);d>,<[-a,-b];-d>,-c]
 4: [c,<-c;[b,(-b,[a,-a])]>]
 
 Proofs of (1):
