@@ -58,7 +58,7 @@ parse x = case x of
     -- Checks that a character is a lowercase letter
     parseVar :: Char -> Term
     parseVar c
-      | isLetter c && (c > 'Z') = V c
+      | isLetter c && c > 'Z' = V c
       | otherwise = error "Invalid expression - variables should be lowercase letters only"
 
     -- Identity is self dual
@@ -67,7 +67,7 @@ parse x = case x of
     parseNot t = Not t
 
     -- Int value handles layers of nested seqs
-    parseSeq :: Int -> [Term] -> [Char] -> String -> Term
+    parseSeq :: Int -> [Term] -> String -> String -> Term
     parseSeq 0 ts ys (x : xs)
       | x == '<' = parseSeq 1 ts (x : ys) xs
       | x == '>' && null xs = Seq (reverse (parse (reverse ys) : ts))
@@ -80,7 +80,7 @@ parse x = case x of
       | otherwise = parseSeq n ts (x : ys) xs
 
     -- Int value handles layers of nested par/copar
-    parsePar :: Int -> [Term] -> [Char] -> String -> Term
+    parsePar :: Int -> [Term] -> String -> String -> Term
     parsePar 0 ts ys (x : xs)
       | x == '(' = parsePar 1 ts (x : ys) xs
       | x == '[' = parsePar 1 ts (x : ys) xs
@@ -96,7 +96,7 @@ parse x = case x of
       | otherwise = parsePar n ts (x : ys) xs
 
     -- Int value handles layers of nested par/copar
-    parseCopar :: Int -> [Term] -> [Char] -> String -> Term
+    parseCopar :: Int -> [Term] -> String -> String -> Term
     parseCopar 0 ts ys (x : xs)
       | x == '(' = parseCopar 1 ts (x : ys) xs
       | x == '[' = parseCopar 1 ts (x : ys) xs
@@ -259,8 +259,24 @@ powerset x = nub (pows x)
     pows [] = [[]]
     pows (x : xs) = [x : ps | ps <- pows xs] ++ pows xs
 
+-- Returns each ordered sublist of a given list starting with the first element (REPLACE???? REDUNDANT????)
+orderedSublist1 :: [a] -> [[a]]
+orderedSublist1 = os []
+  where
+    os :: [a] -> [a] -> [[a]]
+    os seen [] = [reverse seen]
+    os seen (s : seqs) = reverse seen : os (s : seen) seqs
+
+-- Returns each ordered two way split of a list
+twoWaySplit :: [a] -> [([a], [a])]
+twoWaySplit ts = [splitAt n ts | n <- [0 .. length ts]]
+
+-- Returns each permuted two way split of a list
+twoWayPermute :: Eq a => [a] -> [([a], [a])]
+twoWayPermute ts = [(t, ts \\ t) | t <- powerset ts]
+
 -- Gets a list of every letter that has been used as a variable in a Term
-getUsedAtoms :: Term -> [Char]
+getUsedAtoms :: Term -> String
 getUsedAtoms x = case x of
   O -> []
   V t -> [t]
@@ -424,20 +440,24 @@ qDown x = case x of
             [ [ Par (Seq (Par (Seq s : t) : (seqs \\ s)) : (ts \\ t)),
                 Par (Seq (s ++ [Par (Seq (seqs \\ s) : t)]) : (ts \\ t))
               ]
-              | s <- orderedSplit seqs,
+              | s <- orderedSublist1 seqs,
                 t <- powerset ts
             ]
 
     -- For each pair of proper seq substructures of an arbitrary par structure, splits the first
-    -- into 2 (possibly empty) ordered parts ⟨A⟩, ⟨B⟩, the second into similar <C>, <D>,
+    -- into 2 (possibly empty) ordered parts ⟨A⟩, ⟨B⟩, the second into similar <C>, <D>, FINISH COMMENT \\\\\\\\\\\\\\\\\\\\\
     twoSeq :: [Term] -> [Term]
-    twoSeq ts = concat [tseq a b (ts \\ [Seq a, Seq b]) | (a, b) <- takeTwo (getSeqs ts)]
+    twoSeq ts =
+      concat
+        [ tseq a b (ts \\ [Seq a, Seq b])
+          | (a, b) <- takeTwo (getSeqs ts)
+        ]
       where
         tseq :: [Term] -> [Term] -> [Term] -> [Term]
         tseq a b ts =
           [ Par (Seq [Par [Seq as, Seq bs], Par [Seq (a \\ as), Seq (b \\ bs)]] : ts)
-            | as <- orderedSplit a,
-              bs <- orderedSplit b
+            | as <- orderedSublist1 a,
+              bs <- orderedSublist1 b
           ]
 
         takeTwo :: [a] -> [(a, a)]
@@ -448,13 +468,6 @@ qDown x = case x of
     getSeqs [] = []
     getSeqs ((Seq t) : ts) = t : getSeqs ts
     getSeqs (t : ts) = getSeqs ts
-
-    orderedSplit :: [a] -> [[a]]
-    orderedSplit = os []
-      where
-        os :: [a] -> [a] -> [[a]]
-        os seen [] = [reverse seen]
-        os seen (s : seqs) = reverse seen : os (s : seen) seqs
 
 -- Generates a list of all possible single step qDown applications of a Term
 qUp :: Term -> [Term]
@@ -470,26 +483,76 @@ qUp x = case x of
       nub
         ( map
             preprocess
-            ( noCopar ts
-                ++ oneCopar ts
-                ++ twoCopar ts
+            ( -- noCopar ts
+              oneCopar ts
+              --     ++ twoCopar ts
             )
         )
-        \\ [Par ts]
+        \\ [Seq ts]
 
     noCopar :: [Term] -> [Term]
-    noCopar _ = []
+    noCopar ts =
+      concat
+        [ [ Seq (a ++ [Copar [Seq b1, Seq b2]] ++ c)
+            | (b1, b2) <-
+                filter
+                  (\(b1, b2) -> not (null b1) && not (null b2))
+                  (twoWaySplit b)
+          ]
+          | (a, b, c) <- threeWaySplit ts
+        ]
 
     oneCopar :: [Term] -> [Term]
-    oneCopar _ = []
+    oneCopar ts =
+      concat
+        [ concat
+            [ permuteFirst (a, b1, b2, c) ++ permuteLast (a, b1, b2, c)
+              | (b1, b2) <- twoWayPermute b
+            ]
+          | (a, b, c) <- getCopar ts
+        ]
+      where
+        getCopar :: [Term] -> [([Term], [Term], [Term])]
+        getCopar = gCop []
+          where
+            gCop :: [Term] -> [Term] -> [([Term], [Term], [Term])]
+            gCop seen [] = []
+            gCop seen (Copar t : ts) = (reverse seen, t, ts) : gCop (Copar t : seen) ts
+            gCop seen (t : ts) = gCop (t : seen) ts
+
+        permuteFirst :: ([Term], [Term], [Term], [Term]) -> [Term]
+        permuteFirst (a, b1, b2, c) =
+          concat
+            [ [ Seq (a1 ++ [Copar (b1 ++ [Seq (a2 ++ [Copar b2])])] ++ c),
+                Seq (a1 ++ [Copar (Seq (a2 ++ [Copar b1]) : b2)] ++ c)
+              ]
+              | (a1, a2) <- twoWaySplit a
+            ]
+
+        permuteLast :: ([Term], [Term], [Term], [Term]) -> [Term]
+        permuteLast (a, b1, b2, c) =
+          concat
+            [ [ Seq (a ++ [Copar (b1 ++ [Seq (Copar b2 : c1)])] ++ c2),
+                Seq (a ++ [Copar (Seq (Copar b1 : c1) : b2)] ++ c2)
+              ]
+              | (c1, c2) <- twoWaySplit c
+            ]
 
     twoCopar :: [Term] -> [Term]
     twoCopar _ = []
 
-    getCopars :: [Term] -> [[Term]]
-    getCopars [] = []
-    getCopars ((Copar t) : ts) = t : getCopars ts
-    getCopars (t : ts) = getCopars ts
+    -- Splits a list into 3 parts where the middle part has length at least 2
+    threeWaySplit :: [a] -> [([a], [a], [a])]
+    threeWaySplit ts =
+      filter
+        (\(a, b, c) -> length b > 1)
+        ( concat
+            [ [ (take m ts, take n (drop m ts), drop n (drop m ts))
+                | n <- [0 .. length ts - m]
+              ]
+              | m <- [0 .. length ts]
+            ]
+        )
 
 ---------------------------------------------------------------------------------
 -----------------------------Proof Search Algorithm------------------------------
@@ -522,12 +585,12 @@ proofSearch t = doBfsearch [] [(t, '_')]
   where
     doBfsearch :: [Term] -> Proof -> [Proof]
     doBfsearch seen proof
-      | fst (proof !! 0) `elem` seen = []
-      | fst (proof !! 0) == O = [proof]
+      | fst (head proof) `elem` seen = []
+      | fst (head proof) == O = [proof]
       | otherwise =
           concat
-            [ doBfsearch (fst (proof !! 0) : seen) proof'
-              | proof' <- [(t, p) : proof | (t, p) <- reachable (fst (proof !! 0))]
+            [ doBfsearch (fst (head proof) : seen) proof'
+              | proof' <- [(t, p) : proof | (t, p) <- reachable (fst (head proof))]
             ]
 
 bfs :: Term -> Maybe Proof
@@ -538,13 +601,13 @@ bfs start = loop [[(start, '_')]] [] -- minimumBy (compare `on` length)
       | any isDone frontier = find isDone frontier
       | otherwise =
           loop
-            (filter (\p -> notElem (fst (p !! 0)) seen) rs)
-            (seen ++ [fst (r !! 0) | r <- rs])
+            (filter (\p -> fst (p !! 0) `notElem` seen) rs)
+            (seen ++ [fst (head r) | r <- rs])
       where
-        rs = nub $ concat [[r : p | r <- reachable (fst (p !! 0))] | p <- frontier]
+        rs = nub $ concat [[r : p | r <- reachable (fst (head p))] | p <- frontier]
 
     isDone :: Proof -> Bool
-    isDone p = fst (p !! 0) == O
+    isDone p = fst (head p) == O
 
 prove :: IO ()
 prove = runInputT defaultSettings prv
