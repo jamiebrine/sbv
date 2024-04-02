@@ -1,23 +1,19 @@
 ---------------------------------------------------------------------------------
 ---------------------------Imports and Structures--------------------------------
 ---------------------------------------------------------------------------------
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
-{-# HLINT ignore "Use infix" #-}
-{-# HLINT ignore "Use head" #-}
-
-import Control.Monad (guard)
+-- import Control.Monad (guard)
 import Control.Monad.RWS (MonadIO (liftIO), gets)
 import Data.Char (isLetter)
-import Data.Function (on)
+-- import Data.Function (on)
 import Data.List (find, intercalate, minimumBy, nub, sort, subsequences, (\\))
-import Data.Time (TimeLocale (time12Fmt))
-import Distribution.SPDX (LicenseId (OCCT_PL))
-import Distribution.Simple (ProfDetailLevel (ProfDetailToplevelFunctions), defaultMainNoRead)
-import Distribution.Simple.Command (OptDescr (BoolOpt))
-import Distribution.Simple.Utils (xargs)
-import GHC.Exts.Heap (GenClosure (tsoStack))
-import Language.Haskell.TH (safe)
+-- import Data.Time (TimeLocale (time12Fmt))
+-- import Distribution.SPDX (LicenseId (OCCT_PL))
+-- import Distribution.Simple (ProfDetailLevel (ProfDetailToplevelFunctions), defaultMainNoRead)
+-- import Distribution.Simple.Command (OptDescr (BoolOpt))
+-- import Distribution.Simple.Utils (xargs)
+-- import GHC.Exts.Heap (GenClosure (tsoStack))
+-- import Language.Haskell.TH (safe)
 import System.Console.Haskeline
   ( InputT,
     defaultSettings,
@@ -25,12 +21,15 @@ import System.Console.Haskeline
     outputStrLn,
     runInputT,
   )
-import System.Posix (ProcessStatus (Terminated))
-import Text.Read (Lexeme (String))
+
+-- import System.Posix (ProcessStatus (Terminated))
+-- import Text.Read (Lexeme (String))
 
 data Term = O | V Char | Not Term | Seq [Term] | Par [Term] | Copar [Term]
 
-type Proof = [(Term, Char)]
+type Node = (Term, Char)
+
+type Proof = [Node]
 
 instance Show Term where
   show = outputTerm
@@ -483,9 +482,9 @@ qUp x = case x of
       nub
         ( map
             preprocess
-            ( -- noCopar ts
-              oneCopar ts
-              --     ++ twoCopar ts
+            ( noCopar ts
+                ++ oneCopar ts
+                ++ twoCopar ts
             )
         )
         \\ [Seq ts]
@@ -501,6 +500,19 @@ qUp x = case x of
           ]
           | (a, b, c) <- threeWaySplit ts
         ]
+      where
+        -- Splits a list into 3 parts where the middle part has length at least 2
+        threeWaySplit :: [a] -> [([a], [a], [a])]
+        threeWaySplit ts =
+          filter
+            (\(a, b, c) -> length b > 1)
+            ( concat
+                [ [ (take m ts, take n (drop m ts), drop n (drop m ts))
+                    | n <- [0 .. length ts - m]
+                  ]
+                  | m <- [0 .. length ts]
+                ]
+            )
 
     oneCopar :: [Term] -> [Term]
     oneCopar ts =
@@ -516,7 +528,7 @@ qUp x = case x of
         getCopar = gCop []
           where
             gCop :: [Term] -> [Term] -> [([Term], [Term], [Term])]
-            gCop seen [] = []
+            gCop _ [] = []
             gCop seen (Copar t : ts) = (reverse seen, t, ts) : gCop (Copar t : seen) ts
             gCop seen (t : ts) = gCop (t : seen) ts
 
@@ -539,75 +551,65 @@ qUp x = case x of
             ]
 
     twoCopar :: [Term] -> [Term]
-    twoCopar _ = []
-
-    -- Splits a list into 3 parts where the middle part has length at least 2
-    threeWaySplit :: [a] -> [([a], [a], [a])]
-    threeWaySplit ts =
-      filter
-        (\(a, b, c) -> length b > 1)
-        ( concat
-            [ [ (take m ts, take n (drop m ts), drop n (drop m ts))
-                | n <- [0 .. length ts - m]
+    twoCopar ts =
+      concat
+        [ concat
+            [ [ Seq (a ++ [Copar [Seq [Copar b1, Copar c1], Seq [Copar b2, Copar c2]]] ++ d)
+                | (c1, c2) <- twoWayPermute c
               ]
-              | m <- [0 .. length ts]
+              | (b1, b2) <- twoWayPermute b
             ]
-        )
+          | (a, b, c, d) <- consecutiveCopar ts
+        ]
+      where
+        consecutiveCopar :: [Term] -> [([Term], [Term], [Term], [Term])]
+        consecutiveCopar = cC [] []
+          where
+            cC :: [Term] -> [Term] -> [Term] -> [([Term], [Term], [Term], [Term])]
+            cC _ _ [] = []
+            cC seen [] (Copar t : ts) = cC (Copar t : seen) t ts
+            cC seen cpr (Copar t : ts) = (reverse (drop 1 seen), cpr, t, ts) : cC (Copar t : seen) t ts
+            cC seen _ (t : ts) = cC (t : seen) [] ts
 
 ---------------------------------------------------------------------------------
 -----------------------------Proof Search Algorithm------------------------------
 ---------------------------------------------------------------------------------
 
 -- Finds all single step rewrites of a possible Term, and records which rule was used to get there
-reachable :: Term -> [(Term, Char)]
-reachable t =
-  nub
-    ( -- commented out up for development purposes
-      [(ts, 'a') | ts <- aiDown t]
-        -- ++ [(ts, 'A') | ts <- aiUp t]
-        ++ [(ts, 's') | ts <- switch t]
-        -- ++ [(ts, 'Q') | ts <- qUp t]
-        ++ [(ts, 'q') | ts <- qDown t]
-    )
-
--- CURRENTLY UNUSED
-lenTerm :: Term -> Int
-lenTerm x = case x of
-  Seq ts -> sum [lenTerm t | t <- ts]
-  Par ts -> sum [lenTerm t | t <- ts]
-  Copar ts -> sum [lenTerm t | t <- ts]
-  Not t -> 1
-  V v -> 1
-  O -> 0
-
-proofSearch :: Term -> [Proof]
-proofSearch t = doBfsearch [] [(t, '_')]
-  where
-    doBfsearch :: [Term] -> Proof -> [Proof]
-    doBfsearch seen proof
-      | fst (head proof) `elem` seen = []
-      | fst (head proof) == O = [proof]
-      | otherwise =
-          concat
-            [ doBfsearch (fst (head proof) : seen) proof'
-              | proof' <- [(t, p) : proof | (t, p) <- reachable (fst (head proof))]
-            ]
+reachable :: Node -> [Node]
+reachable (t, _) =
+  [(t', 'a') | t' <- aiDown t]
+    -- ++ [(t', 'A') | t' <- aiUp t]
+    ++ [(t', 's') | t' <- switch t]
+    ++ [(t', 'Q') | t' <- qUp t]
+    ++ [(t', 'q') | t' <- qDown t]
 
 bfs :: Term -> Maybe Proof
-bfs start = loop [[(start, '_')]] [] -- minimumBy (compare `on` length)
+bfs start = loop [[(start, '_')]] []
   where
     loop :: [Proof] -> [Term] -> Maybe Proof
     loop frontier seen
+      | null frontier = Nothing
       | any isDone frontier = find isDone frontier
       | otherwise =
           loop
-            (filter (\p -> fst (p !! 0) `notElem` seen) rs)
+            (filter (\p -> fst (head p) `notElem` seen) rs)
             (seen ++ [fst (head r) | r <- rs])
       where
-        rs = nub $ concat [[r : p | r <- reachable (fst (head p))] | p <- frontier]
+        rs = nub $ concat [[r : p | r <- reachable (head p)] | p <- frontier]
 
-    isDone :: Proof -> Bool
-    isDone p = fst (head p) == O
+isDone :: Proof -> Bool
+isDone p = fst (head p) == O
+
+{-
+dfs :: Term -> [Proof]
+dfs start = loop [(start, '_')]
+  where
+    loop :: Proof -> Maybe Proof
+    loop x
+      | isDone x = Just x
+      | otherwise = listToMaybe $ mapMaybe loop (reachable x)
+-}
 
 prove :: IO ()
 prove = runInputT defaultSettings prv
@@ -619,13 +621,9 @@ prove = runInputT defaultSettings prv
       case input of
         Just x -> liftIO (mapM_ outputProof (bfs (preprocess (parse x))))
         Nothing -> outputStrLn "Invalid input - ????"
-      outputStrLn "Proof search finished"
-
-motivate :: IO ()
-motivate = putStrLn "you got this <3"
 
 rab :: String -> [Term]
-rab t = map fst (reachable (preprocess (parse t)))
+rab t = map fst (reachable (preprocess (parse t), '_'))
 
 {-
 Testing material
