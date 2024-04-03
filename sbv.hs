@@ -2,18 +2,10 @@
 ---------------------------Imports and Structures--------------------------------
 ---------------------------------------------------------------------------------
 
--- import Control.Monad (guard)
 import Control.Monad.RWS (MonadIO (liftIO), gets)
-import Data.Char (isLetter)
--- import Data.Function (on)
+import Data.Char (intToDigit, isLetter)
 import Data.List (find, intercalate, minimumBy, nub, sort, subsequences, (\\))
--- import Data.Time (TimeLocale (time12Fmt))
--- import Distribution.SPDX (LicenseId (OCCT_PL))
--- import Distribution.Simple (ProfDetailLevel (ProfDetailToplevelFunctions), defaultMainNoRead)
--- import Distribution.Simple.Command (OptDescr (BoolOpt))
--- import Distribution.Simple.Utils (xargs)
--- import GHC.Exts.Heap (GenClosure (tsoStack))
--- import Language.Haskell.TH (safe)
+import Debug.Trace (trace)
 import System.Console.Haskeline
   ( InputT,
     defaultSettings,
@@ -21,9 +13,6 @@ import System.Console.Haskeline
     outputStrLn,
     runInputT,
   )
-
--- import System.Posix (ProcessStatus (Terminated))
--- import Text.Read (Lexeme (String))
 
 data Term = O | V Char | Not Term | Seq [Term] | Par [Term] | Copar [Term]
 
@@ -126,8 +115,10 @@ outputTerms [] "" = "None"
 outputTerms ts "" = intercalate "\n" [outputTerm t | t <- ts]
 
 -- Outputs a proof in a more readable way
-outputProof :: Proof -> IO ()
-outputProof proof = putStrLn ("\n" ++ (intercalate "\n" [ruleUsed t p ++ outputTerm t | (t, p) <- shift proof ' ']) ++ "\n")
+outputProof :: Maybe Proof -> String
+outputProof x = case x of
+  Nothing -> "No proof found (pVal = " ++ show pVal ++ ")"
+  Just proof -> "\n" ++ (intercalate "\n" [ruleUsed t p ++ outputTerm t | (t, p) <- shift proof ' ']) ++ "\n"
   where
     ruleUsed :: Term -> Char -> String
     ruleUsed t p = replicate (length (outputTerm t)) '-' ++ [p] ++ "\n"
@@ -138,10 +129,6 @@ outputProof proof = putStrLn ("\n" ++ (intercalate "\n" [ruleUsed t p ++ outputT
     shift [] _ = []
     shift ((t, p) : ps) ' ' = (O, 'o') : shift ps p
     shift ((t, p) : ps) p' = (t, p') : shift ps p
-
-outputMaybeProof :: Maybe Proof -> IO ()
-outputMaybeProof (Just p) = outputProof p
-outputMaybeProof Nothing = putStrLn "No proof found"
 
 ---------------------------------------------------------------------------------
 ---------------------------Equivalence-------------------------------------------
@@ -167,6 +154,7 @@ _ ~= _ = False
 (/~=) :: Term -> Term -> Bool
 t1 /~= t2 = not (t1 ~= t2)
 
+-- Removes empty sequences and identities from any Term
 removeId :: Term -> Term
 removeId x = case x of
   Seq ts -> Seq (filter (/= O) (map removeId ts))
@@ -250,29 +238,21 @@ deepInference ts f = di [] ts f \\ [ts]
     di seen [] f = []
     di seen (t : ts) f = [reverse seen ++ [s] ++ ts | s <- f t] ++ di (t : seen) ts f
 
--- Returns all lists that can be constructed with any number of elements of the given list
-powerset :: Eq a => [a] -> [[a]]
-powerset x = nub (pows x)
-  where
-    pows :: [a] -> [[a]]
-    pows [] = [[]]
-    pows (x : xs) = [x : ps | ps <- pows xs] ++ pows xs
-
--- Returns each ordered sublist of a given list starting with the first element (REPLACE???? REDUNDANT????)
-orderedSublist1 :: [a] -> [[a]]
-orderedSublist1 = os []
-  where
-    os :: [a] -> [a] -> [[a]]
-    os seen [] = [reverse seen]
-    os seen (s : seqs) = reverse seen : os (s : seen) seqs
-
 -- Returns each ordered two way split of a list
 twoWaySplit :: [a] -> [([a], [a])]
 twoWaySplit ts = [splitAt n ts | n <- [0 .. length ts]]
 
--- Returns each permuted two way split of a list
+-- Returns each subset of a list with it's complement
 twoWayPermute :: Eq a => [a] -> [([a], [a])]
 twoWayPermute ts = [(t, ts \\ t) | t <- powerset ts]
+  where
+    -- Returns all lists that can be constructed with any number of elements of the given list
+    powerset :: Eq a => [a] -> [[a]]
+    powerset x = nub (pows x)
+      where
+        pows :: [a] -> [[a]]
+        pows [] = [[]]
+        pows (x : xs) = [x : ps | ps <- pows xs] ++ pows xs
 
 -- Gets a list of every letter that has been used as a variable in a Term
 getUsedAtoms :: Term -> String
@@ -340,19 +320,22 @@ aiDown x = case x of
 
 -- Generates a list of all possible aiUp rewrites of a Term
 aiUp :: Term -> [Term]
-aiUp x = case x of
-  Seq ts ->
-    concat [oneiUp a (Seq ts) | a <- getUsedAtoms (Seq ts)]
-      ++ [Seq t | t <- deepInference ts aiUp]
-  Par ts ->
-    concat [oneiUp a (Par ts) | a <- getUsedAtoms (Par ts)]
-      ++ [Par t | t <- deepInference ts aiUp]
-  Copar ts ->
-    concat [oneiUp a (Copar ts) | a <- getUsedAtoms (Copar ts)]
-      ++ [Copar t | t <- deepInference ts aiUp]
-  t -> []
+aiUp t = nub $ iUp t (getUsedAtoms t)
+  where
+    iUp :: Term -> [Char] -> [Term]
+    iUp x chars = case x of
+      Seq ts ->
+        concat [oneiUp a (Seq ts) | a <- chars]
+          ++ [Seq t | t <- deepInference ts aiUp]
+      Par ts ->
+        concat [oneiUp a (Par ts) | a <- chars]
+          ++ [Par t | t <- deepInference ts aiUp]
+      Copar ts ->
+        concat [oneiUp a (Copar ts) | a <- chars]
+          ++ [Copar t | t <- deepInference ts aiUp]
+      t -> concat [oneiUp a t | a <- chars]
 
--- Generates a list of all possible single step switches of a Term
+-- Generates a list of all possible switch rewrites of a Term
 switch :: Term -> [Term]
 switch x = case x of
   Par ts ->
@@ -371,6 +354,7 @@ switch x = case x of
             )
         )
         \\ [Par ts]
+
     -- Returns a list of tuples where each is of the form
     -- ([Terms inside a copar element of the given list],[All other Terms])
     extractCopar :: [Term] -> [([Term], [Term])]
@@ -383,15 +367,15 @@ switch x = case x of
 
     permute :: ([Term], [Term]) -> [Term]
     permute (as, bs) =
-      [ Par (Copar (Par (Copar a : b) : (as \\ a)) : (bs \\ b))
-        | a <- powerset as,
-          b <- powerset bs
+      [ Par (Copar (Par (Copar a1 : b1) : a2) : b2)
+        | (a1, a2) <- twoWayPermute as,
+          (b1, b2) <- twoWayPermute bs
       ]
 
     degenerate :: [Term] -> [Term]
-    degenerate ts = [Par (Copar ts' : (ts \\ ts')) | ts' <- powerset ts]
+    degenerate ts = [Par (Copar t1 : t2) | (t1, t2) <- twoWayPermute ts]
 
--- Generates a list of all possible single step qDown applications of a Term
+-- Generates a list of all possible qDown rewrites of a Term
 qDown :: Term -> [Term]
 qDown x = case x of
   Par ts ->
@@ -402,15 +386,14 @@ qDown x = case x of
   where
     qdwn :: [Term] -> [Term]
     qdwn ts =
-      nub
-        ( map
-            preprocess
-            ( noSeq ts
-                ++ oneSeq ts
-                ++ twoSeq ts
-            )
-        )
-        \\ [Par ts]
+      nub $
+        map
+          preprocess
+          ( noSeq ts
+              ++ oneSeq ts
+              ++ twoSeq ts
+          )
+          \\ [Par ts]
 
     -- Split any Par Term into 3 (possibly empty) parts, impose an ordering on two of them,
     -- and put that ordering inside of a Par context with the third
@@ -418,12 +401,12 @@ qDown x = case x of
     noSeq ts =
       concat
         ( concat
-            [ [ [ Par (Seq [Par (as \\ bs), Par bs] : (ts \\ as)),
-                  Par (Seq [Par bs, Par (as \\ bs)] : (ts \\ as))
+            [ [ [ Par (Seq [Par b2, Par b1] : a2),
+                  Par (Seq [Par b1, Par b2] : a2)
                 ]
-                | bs <- powerset as
+                | (b1, b2) <- twoWayPermute a1
               ]
-              | as <- powerset ts
+              | (a1, a2) <- twoWayPermute ts
             ]
         )
 
@@ -436,11 +419,11 @@ qDown x = case x of
         oseq :: [Term] -> [Term] -> [Term]
         oseq seqs ts =
           concat
-            [ [ Par (Seq (Par (Seq s : t) : (seqs \\ s)) : (ts \\ t)),
-                Par (Seq (s ++ [Par (Seq (seqs \\ s) : t)]) : (ts \\ t))
+            [ [ Par (Seq (Par (Seq s1 : t1) : s2) : t2),
+                Par (Seq (s1 ++ [Par (Seq s2 : t1)]) : t2)
               ]
-              | s <- orderedSublist1 seqs,
-                t <- powerset ts
+              | (s1, s2) <- twoWaySplit seqs,
+                (t1, t2) <- twoWayPermute ts
             ]
 
     -- For each pair of proper seq substructures of an arbitrary par structure, splits the first
@@ -454,9 +437,9 @@ qDown x = case x of
       where
         tseq :: [Term] -> [Term] -> [Term] -> [Term]
         tseq a b ts =
-          [ Par (Seq [Par [Seq as, Seq bs], Par [Seq (a \\ as), Seq (b \\ bs)]] : ts)
-            | as <- orderedSublist1 a,
-              bs <- orderedSublist1 b
+          [ Par (Seq [Par [Seq a1, Seq b1], Par [Seq a2, Seq b2]] : ts)
+            | (a1, a2) <- twoWaySplit a,
+              (b1, b2) <- twoWaySplit b
           ]
 
         takeTwo :: [a] -> [(a, a)]
@@ -584,32 +567,36 @@ reachable (t, _) =
     ++ [(t', 'Q') | t' <- qUp t]
     ++ [(t', 'q') | t' <- qDown t]
 
-bfs :: Term -> Maybe Proof
-bfs start = loop [[(start, '_')]] []
+-- Longest allowed chain of rewrites of a candidate proof without an application of aiDown
+pVal :: Int
+pVal = 3
+
+-- Breadth first proof search algorithm with pruning
+search :: Term -> Maybe Proof
+search start = loop [[(start, '_')]]
   where
-    loop :: [Proof] -> [Term] -> Maybe Proof
-    loop frontier seen
+    loop :: [Proof] -> Maybe Proof
+    loop frontier
       | null frontier = Nothing
       | any isDone frontier = find isDone frontier
       | otherwise =
-          loop
-            (filter (\p -> fst (head p) `notElem` seen) rs)
-            (seen ++ [fst (head r) | r <- rs])
+          trace (show (length frontier)) loop (filter prune lst)
       where
-        rs = nub $ concat [[r : p | r <- reachable (head p)] | p <- frontier]
+        -- Generates next stage in proof search by attaching every rewrite
+        -- rule of the topmost stage of a candidate proof to that proof,
+        -- for every candidate proof in the frontier
+        lst :: [Proof]
+        lst = concat [[r : p | r <- reachable (head p)] | p <- frontier]
 
-isDone :: Proof -> Bool
-isDone p = fst (head p) == O
+        -- Attempted proofs that have not applied aiDown in their last
+        -- pVal stages are pruned
+        prune :: Proof -> Bool
+        prune p
+          | length p < pVal = True
+          | otherwise = 'a' `elem` map snd (take pVal p)
 
-{-
-dfs :: Term -> [Proof]
-dfs start = loop [(start, '_')]
-  where
-    loop :: Proof -> Maybe Proof
-    loop x
-      | isDone x = Just x
-      | otherwise = listToMaybe $ mapMaybe loop (reachable x)
--}
+        isDone :: Proof -> Bool
+        isDone p = fst (head p) == O
 
 prove :: IO ()
 prove = runInputT defaultSettings prv
@@ -619,81 +606,14 @@ prove = runInputT defaultSettings prv
       input <- getInputLine "Enter SBV structure to prove:\n"
       outputStrLn "Searching for proof..."
       case input of
-        Just x -> liftIO (mapM_ outputProof (bfs (preprocess (parse x))))
-        Nothing -> outputStrLn "Invalid input - ????"
-
-rab :: String -> [Term]
-rab t = map fst (reachable (preprocess (parse t), '_'))
+        Just x -> outputStrLn (outputProof (search (preprocess (parse x))))
+        Nothing -> outputStrLn "Invalid input - enter an SBV structure"
 
 {-
 Testing material
 
 1: [(a,b),-a,-b]
-2: [<a;(b,-a)>,[-b,a,-a]]
+2: [<a;(b,-a)>,-b,a,-a]
 3: [<a;(b,c);d>,<[-a,-b];-d>,-c]
 4: [c,<-c;[b,(-b,[a,-a])]>]
-
-Proofs of (1):
-
--o
-O
-------a
-[b,-b]
----------------a
-[([a,-a],b),-b]
--------------s
-[(a,b),-a,-b]
-
--o
-O
-------a
-[a,-a]
----------------a
-([b,-b],[a,-a])
----------------s
-[([a,-a],b),-b]
--------------s
-[(a,b),-a,-b]
-
--o
-O
-------a
-[b,-b]
----------------a
-([b,-b],[a,-a])
----------------s
-[([a,-a],b),-b]
--------------s
-[(a,b),-a,-b]
-
--o
-O
-------a
-[a,-a]
----------------a
-[([b,-b],a),-a]
--------------s
-[(a,b),-a,-b]
-
--o
-O
-------a
-[b,-b]
----------------a
-([a,-a],[b,-b])
----------------s
-[([b,-b],a),-a]
--------------s
-[(a,b),-a,-b]
-
--o
-O
-------a
-[a,-a]
----------------a
-([a,-a],[b,-b])
----------------s
-[([b,-b],a),-a]
--------------s
-[(a,b),-a,-b]
 -}
