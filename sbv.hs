@@ -1,3 +1,5 @@
+module SBV (Term (..), Node (..), Proof (..), prove, parse) where
+
 ---------------------------------------------------------------------------------
 ---------------------------Imports and Structures--------------------------------
 ---------------------------------------------------------------------------------
@@ -579,8 +581,7 @@ search start = loop [[(start, '_')]]
     loop frontier
       | null frontier = Nothing
       | any isDone frontier = find isDone frontier
-      | otherwise =
-          trace (show (length frontier)) loop (filter prune lst)
+      | otherwise = loop (filter prune lst) -- `dbg` show (length frontier)
       where
         -- Generates next stage in proof search by attaching every rewrite
         -- rule of the topmost stage of a candidate proof to that proof,
@@ -588,15 +589,15 @@ search start = loop [[(start, '_')]]
         lst :: [Proof]
         lst = concat [[r : p | r <- reachable (head p)] | p <- frontier]
 
+        isDone :: Proof -> Bool
+        isDone p = fst (head p) == O
+
         -- Attempted proofs that have not applied aiDown in their last
         -- pVal stages are pruned
         prune :: Proof -> Bool
         prune p
           | length p < pVal = True
           | otherwise = 'a' `elem` map snd (take pVal p)
-
-        isDone :: Proof -> Bool
-        isDone p = fst (head p) == O
 
 prove :: IO ()
 prove = runInputT defaultSettings prv
@@ -617,3 +618,11 @@ Testing material
 3: [<a;(b,c);d>,<[-a,-b];-d>,-c]
 4: [c,<-c;[b,(-b,[a,-a])]>]
 -}
+
+---------------TESTING FUNCTIONS-----------------
+dbg :: a -> String -> a
+dbg = flip trace
+
+testEq :: String -> String -> Bool
+testEq str1 str2 =
+  preprocess (parse str1) == preprocess (parse str2)
