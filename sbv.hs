@@ -1,4 +1,4 @@
-module SBV (Term (..), Node (..), Proof (..), prove, parse) where
+module SBV (prove) where
 
 ---------------------------------------------------------------------------------
 ---------------------------Imports and Structures--------------------------------
@@ -599,16 +599,11 @@ search start = loop [[(start, '_')]]
           | length p < pVal = True
           | otherwise = 'a' `elem` map snd (take pVal p)
 
-prove :: IO ()
-prove = runInputT defaultSettings prv
-  where
-    prv :: InputT IO ()
-    prv = do
-      input <- getInputLine "Enter SBV structure to prove:\n"
-      outputStrLn "Searching for proof..."
-      case input of
-        Just x -> outputStrLn (outputProof (search (preprocess (parse x))))
-        Nothing -> outputStrLn "Invalid input - enter an SBV structure"
+prove :: String -> IO ()
+prove structure = do
+  putStrLn "Searching for proof..."
+  putStrLn (outputProof (search (preprocess (parse structure))))
+  putStrLn "Proof search complete"
 
 {-
 Testing material
