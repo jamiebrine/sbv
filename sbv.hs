@@ -4,17 +4,8 @@ module SBV (prove) where
 ---------------------------Imports and Structures--------------------------------
 ---------------------------------------------------------------------------------
 
-import Control.Monad.RWS (MonadIO (liftIO), gets)
-import Data.Char (intToDigit, isLetter)
-import Data.List (find, intercalate, minimumBy, nub, sort, subsequences, (\\))
-import Debug.Trace (trace)
-import System.Console.Haskeline
-  ( InputT,
-    defaultSettings,
-    getInputLine,
-    outputStrLn,
-    runInputT,
-  )
+import Data.Char (isLetter)
+import Data.List (find, intercalate, nub, (\\))
 
 data Term = O | V Char | Not Term | Seq [Term] | Par [Term] | Copar [Term]
 
@@ -117,8 +108,8 @@ outputTerms [] "" = "None"
 outputTerms ts "" = intercalate "\n" [outputTerm t | t <- ts]
 
 -- Outputs a proof in a more readable way
-outputProof :: Maybe Proof -> String
-outputProof x = case x of
+outputProof :: Maybe Proof -> Int -> String
+outputProof x pVal = case x of
   Nothing -> "No proof found (pVal = " ++ show pVal ++ ")"
   Just proof -> "\n" ++ (intercalate "\n" [ruleUsed t p ++ outputTerm t | (t, p) <- shift proof ' ']) ++ "\n"
   where
@@ -126,7 +117,6 @@ outputProof x = case x of
     ruleUsed t p = replicate (length (outputTerm t)) '-' ++ [p] ++ "\n"
 
     -- Moves all rules down a level and adds the o rule instead to the O Term
-    -- Improves readability
     shift :: Proof -> Char -> Proof
     shift [] _ = []
     shift ((t, p) : ps) ' ' = (O, 'o') : shift ps p
@@ -348,14 +338,15 @@ switch x = case x of
   where
     swtch :: [Term] -> [Term]
     swtch ts =
-      nub
-        ( map
-            preprocess
-            ( concat [permute ts' | ts' <- extractCopar ts]
-                ++ degenerate ts
-            )
-        )
-        \\ [Par ts]
+      nub $
+        filter
+          (/= Par ts)
+          ( map
+              preprocess
+              ( concat [permute ts' | ts' <- extractCopar ts]
+                  ++ degenerate ts
+              )
+          )
 
     -- Returns a list of tuples where each is of the form
     -- ([Terms inside a copar element of the given list],[All other Terms])
@@ -389,14 +380,15 @@ qDown x = case x of
     qdwn :: [Term] -> [Term]
     qdwn ts =
       nub $
-        map
-          preprocess
-          ( noSeq ts
-              ++ oneSeq ts
-              ++ twoSeq ts
+        filter
+          (/= Par ts)
+          ( map
+              preprocess
+              ( noSeq ts
+                  ++ oneSeq ts
+                  ++ twoSeq ts
+              )
           )
-          \\ [Par ts]
-
     -- Split any Par Term into 3 (possibly empty) parts, impose an ordering on two of them,
     -- and put that ordering inside of a Par context with the third
     noSeq :: [Term] -> [Term]
@@ -428,8 +420,6 @@ qDown x = case x of
                 (t1, t2) <- twoWayPermute ts
             ]
 
-    -- For each pair of proper seq substructures of an arbitrary par structure, splits the first
-    -- into 2 (possibly empty) ordered parts ⟨A⟩, ⟨B⟩, the second into similar <C>, <D>, FINISH COMMENT \\\\\\\\\\\\\\\\\\\\\
     twoSeq :: [Term] -> [Term]
     twoSeq ts =
       concat
@@ -464,15 +454,16 @@ qUp x = case x of
   where
     qp :: [Term] -> [Term]
     qp ts =
-      nub
-        ( map
-            preprocess
-            ( noCopar ts
-                ++ oneCopar ts
-                ++ twoCopar ts
-            )
-        )
-        \\ [Seq ts]
+      nub $
+        filter
+          (/= Seq ts)
+          ( map
+              preprocess
+              ( noCopar ts
+                  ++ oneCopar ts
+                  ++ twoCopar ts
+              )
+          )
 
     noCopar :: [Term] -> [Term]
     noCopar ts =
@@ -569,19 +560,15 @@ reachable (t, _) =
     ++ [(t', 'Q') | t' <- qUp t]
     ++ [(t', 'q') | t' <- qDown t]
 
--- Longest allowed chain of rewrites of a candidate proof without an application of aiDown
-pVal :: Int
-pVal = 3
-
 -- Breadth first proof search algorithm with pruning
-search :: Term -> Maybe Proof
-search start = loop [[(start, '_')]]
+search :: Term -> Int -> Maybe Proof
+search start pVal = loop [[(start, '_')]]
   where
     loop :: [Proof] -> Maybe Proof
     loop frontier
       | null frontier = Nothing
       | any isDone frontier = find isDone frontier
-      | otherwise = loop (filter prune lst) -- `dbg` show (length frontier)
+      | otherwise = loop (filter prune lst)
       where
         -- Generates next stage in proof search by attaching every rewrite
         -- rule of the topmost stage of a candidate proof to that proof,
@@ -599,25 +586,9 @@ search start = loop [[(start, '_')]]
           | length p < pVal = True
           | otherwise = 'a' `elem` map snd (take pVal p)
 
-prove :: String -> IO ()
-prove structure = do
+prove :: String -> Int -> IO ()
+prove structure pVal = do
   putStrLn "Searching for proof..."
-  putStrLn (outputProof (search (preprocess (parse structure))))
+  putStrLn
+    (outputProof (search (preprocess (parse structure)) pVal) pVal)
   putStrLn "Proof search complete"
-
-{-
-Testing material
-
-1: [(a,b),-a,-b]
-2: [<a;(b,-a)>,-b,a,-a]
-3: [<a;(b,c);d>,<[-a,-b];-d>,-c]
-4: [c,<-c;[b,(-b,[a,-a])]>]
--}
-
----------------TESTING FUNCTIONS-----------------
-dbg :: a -> String -> a
-dbg = flip trace
-
-testEq :: String -> String -> Bool
-testEq str1 str2 =
-  preprocess (parse str1) == preprocess (parse str2)
